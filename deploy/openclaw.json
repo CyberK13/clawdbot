@@ -1,0 +1,266 @@
+{
+  // ============================================
+  // OpenClaw 部署配置文件
+  // 域名: clawdbot.cyberoracle.net
+  // 部署位置: ~/.openclaw/openclaw.json
+  // ============================================
+
+  // --------------------------------------------
+  // 会话配置 (多用户隔离)
+  // --------------------------------------------
+  "session": {
+    // per-channel-peer: 每个用户在每个渠道独立会话
+    "dmScope": "per-channel-peer"
+  },
+
+  // --------------------------------------------
+  // Agent 配置
+  // --------------------------------------------
+  "agents": {
+    "defaults": {
+      // 默认模型配置
+      "model": {
+        "primary": "minimax/MiniMax-M2.1",
+        "fallbacks": ["google/gemini-2.0-flash", "deepseek/deepseek-chat"]
+      },
+
+      // 模型白名单 + 别名 (用于 /model 切换)
+      "models": {
+        // MiniMax 系列
+        "minimax/MiniMax-M2.1": { "alias": "minimax" },
+        "minimax/MiniMax-M2.1-lightning": { "alias": "minimax-fast" },
+
+        // Google Gemini 系列
+        "google/gemini-2.0-flash": { "alias": "gemini" },
+        "google/gemini-2.5-pro-preview": { "alias": "gemini-pro" },
+        "google/gemini-2.5-flash-preview": { "alias": "gemini-flash" },
+
+        // DeepSeek 系列
+        "deepseek/deepseek-chat": { "alias": "deepseek" },
+        "deepseek/deepseek-reasoner": { "alias": "deepseek-r1" }
+      }
+    },
+
+    // 每用户独立 agent
+    "list": [
+      {
+        "id": "user1",
+        "name": "Kyle",
+        "workspace": "~/clawd-user1",
+        "default": true
+      },
+      {
+        "id": "user2",
+        "name": "Jack",
+        "workspace": "~/clawd-user2"
+      },
+      {
+        "id": "user3",
+        "name": "Jing",
+        "workspace": "~/clawd-user3"
+      }
+    ]
+  },
+
+  // --------------------------------------------
+  // 路由绑定 (用户 → Agent)
+  // 注: kind 用 "direct" (上游规范值，"dm" 已 deprecated)
+  // --------------------------------------------
+  "bindings": [
+    // Telegram 绑定
+    {
+      "agentId": "user1",
+      "match": {
+        "channel": "telegram",
+        "peer": { "kind": "direct", "id": "6309937609" }
+      }
+    },
+    {
+      "agentId": "user2",
+      "match": {
+        "channel": "telegram",
+        "peer": { "kind": "direct", "id": "8412468762" }
+      }
+    },
+    {
+      "agentId": "user3",
+      "match": {
+        "channel": "telegram",
+        "peer": { "kind": "direct", "id": "7121639624" }
+      }
+    },
+
+    // WhatsApp 绑定
+    {
+      "agentId": "user1",
+      "match": {
+        "channel": "whatsapp",
+        "peer": { "kind": "direct", "id": "+61459188816" }
+      }
+    },
+    // { "agentId": "user2", "match": { "channel": "whatsapp", "peer": { "kind": "direct", "id": "" } } },  // Jack 手机号（待填）
+    {
+      "agentId": "user3",
+      "match": {
+        "channel": "whatsapp",
+        "peer": { "kind": "direct", "id": "+61452608816" }
+      }
+    }
+  ],
+
+  // --------------------------------------------
+  // 模型 Provider 配置
+  // --------------------------------------------
+  "models": {
+    "mode": "merge",
+    "providers": {
+      // MiniMax 配置
+      "minimax": {
+        "baseUrl": "https://api.minimax.io/anthropic",
+        "apiKey": "${MINIMAX_API_KEY}",
+        "api": "anthropic-messages",
+        "models": [
+          {
+            "id": "MiniMax-M2.1",
+            "name": "MiniMax M2.1",
+            "reasoning": false,
+            "input": ["text"],
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "cost": { "input": 15, "output": 60, "cacheRead": 2, "cacheWrite": 10 }
+          },
+          {
+            "id": "MiniMax-M2.1-lightning",
+            "name": "MiniMax M2.1 Lightning",
+            "reasoning": false,
+            "input": ["text"],
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "cost": { "input": 15, "output": 90 }
+          }
+        ]
+      },
+
+      // DeepSeek 配置 (OpenAI 兼容)
+      "deepseek": {
+        "baseUrl": "https://api.deepseek.com/v1",
+        "apiKey": "${DEEPSEEK_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "deepseek-chat",
+            "name": "DeepSeek V3",
+            "reasoning": false,
+            "input": ["text"],
+            "contextWindow": 64000,
+            "maxTokens": 8192,
+            "cost": { "input": 0.27, "output": 1.1 }
+          },
+          {
+            "id": "deepseek-reasoner",
+            "name": "DeepSeek R1",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 64000,
+            "maxTokens": 8192,
+            "cost": { "input": 0.55, "output": 2.19 }
+          }
+        ]
+      },
+
+      // Google Gemini (原生支持，只需 API Key)
+      "google": {
+        "apiKey": "${GOOGLE_API_KEY}"
+      }
+    }
+  },
+
+  // --------------------------------------------
+  // 频道配置
+  // --------------------------------------------
+  "channels": {
+    // Telegram
+    "telegram": {
+      "enabled": true,
+      "botToken": "${TELEGRAM_BOT_TOKEN}",
+      "dmPolicy": "allowlist",
+      "allowFrom": [
+        "6309937609", // Kyle
+        "8412468762", // Jack
+        "7121639624" // Jing
+      ],
+      "groupPolicy": "disabled",
+      "textChunkLimit": 4000,
+      "mediaMaxMb": 10
+    },
+
+    // WhatsApp
+    "whatsapp": {
+      "enabled": true,
+      "dmPolicy": "allowlist",
+      "allowFrom": [
+        "+61459188816", // Kyle
+        "+61452608816" // Jing
+        // ""            // Jack（待填）
+      ],
+      "groupPolicy": "disabled",
+      "sendReadReceipts": true,
+      "textChunkLimit": 4000,
+      "mediaMaxMb": 50
+    }
+  },
+
+  // --------------------------------------------
+  // 命令配置
+  // --------------------------------------------
+  "commands": {
+    "native": "auto",
+    "text": true,
+    "config": false, // 禁用 /config (安全)
+    "debug": false // 禁用 /debug (安全)
+  },
+
+  // --------------------------------------------
+  // 消息配置
+  // --------------------------------------------
+  "messages": {
+    // "responsePrefix": "[CyberOracle]",
+    "groupChat": {
+      "historyLimit": 50
+    }
+  },
+
+  // --------------------------------------------
+  // Webhook / Gmail 配置
+  // --------------------------------------------
+  "hooks": {
+    "enabled": true,
+    "token": "${CLAWDBOT_HOOK_TOKEN}",
+    "path": "/hooks",
+    "presets": ["gmail"],
+
+    // Gmail 专用配置
+    "gmail": {
+      "account": "${GMAIL_ACCOUNT}",
+      "model": "google/gemini-2.0-flash",
+      "thinking": "off"
+    },
+
+    // 路由映射
+    "mappings": [
+      {
+        // Jing 的 Gmail → Telegram 通知
+        "match": { "path": "gmail" },
+        "action": "agent",
+        "agentId": "user3",
+        "wakeMode": "now",
+        "name": "Gmail",
+        "sessionKey": "hook:gmail:{{messages[0].id}}",
+        "messageTemplate": "📧 新邮件\n发件人: {{messages[0].from}}\n主题: {{messages[0].subject}}\n---\n{{messages[0].snippet}}",
+        "deliver": true,
+        "channel": "telegram",
+        "to": "7121639624"
+      }
+    ]
+  }
+}

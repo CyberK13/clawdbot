@@ -1,0 +1,152 @@
+{
+  // ============================================
+  // OpenClaw 主配置文件
+  // Bot: @cyberoracle_clawd_ai_bot
+  // 域名: clawdbot.cyberoracle.net
+  // ============================================
+
+  // --------------------------------------------
+  // Agent 配置 (多用户独立记忆)
+  // --------------------------------------------
+  "agents": {
+    // 共享默认配置 (各 agent 继承)
+    "defaults": {
+      "model": {
+        "primary": "minimax/MiniMax-M2.1",
+        "fallbacks": ["google/gemini-3-flash-preview", "deepseek/deepseek-chat"]
+      },
+      "models": {
+        "minimax/MiniMax-M2.1": { "alias": "minimax" },
+        "google/gemini-3-flash-preview": { "alias": "gemini" },
+        "google/gemini-3-pro-preview": { "alias": "gemini-pro" },
+        "deepseek/deepseek-chat": { "alias": "deepseek" },
+        "anthropic/claude-sonnet-4-5": { "alias": "claude" },
+        "anthropic/claude-opus-4-5": { "alias": "opus" },
+        "openai/gpt-5": { "alias": "gpt" }
+      }
+    },
+
+    // 每用户独立 agent
+    "list": [
+      {
+        "id": "user1",
+        "name": "User1",
+        "workspace": "~/clawd-user1",
+        "default": true
+      },
+      {
+        "id": "user2",
+        "name": "User2",
+        "workspace": "~/clawd-user2"
+      },
+      {
+        "id": "user3",
+        "name": "Jing",
+        "workspace": "~/clawd-user3"
+      }
+    ]
+  },
+
+  // --------------------------------------------
+  // 会话配置 (多用户隔离)
+  // --------------------------------------------
+  "session": {
+    // per-channel-peer: 每个用户在每个渠道独立会话
+    "dmScope": "per-channel-peer"
+  },
+
+  // --------------------------------------------
+  // 路由绑定 (TG User ID → Agent)
+  // 注: kind 用 "direct" (上游规范值，"dm" 已 deprecated)
+  // --------------------------------------------
+  "bindings": [
+    {
+      "agentId": "user1",
+      "match": {
+        "channel": "telegram",
+        "peer": { "kind": "direct", "id": "6309937609" }
+      }
+    },
+    {
+      "agentId": "user2",
+      "match": {
+        "channel": "telegram",
+        "peer": { "kind": "direct", "id": "8412468762" }
+      }
+    },
+    {
+      "agentId": "user3",
+      "match": {
+        "channel": "telegram",
+        "peer": { "kind": "direct", "id": "7121639624" }
+      }
+    }
+  ],
+
+  // --------------------------------------------
+  // 模型 Provider 配置
+  // --------------------------------------------
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "minimax": {
+        "baseUrl": "https://api.minimax.io/anthropic",
+        "apiKey": "${MINIMAX_API_KEY}",
+        "api": "anthropic-messages",
+        "models": [
+          {
+            "id": "MiniMax-M2.1",
+            "name": "MiniMax M2.1",
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "cost": { "input": 15, "output": 60 }
+          }
+        ]
+      },
+      "deepseek": {
+        "baseUrl": "https://api.deepseek.com/v1",
+        "apiKey": "${DEEPSEEK_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "deepseek-chat",
+            "name": "DeepSeek V3",
+            "contextWindow": 64000,
+            "maxTokens": 8192,
+            "cost": { "input": 0.27, "output": 1.1 }
+          }
+        ]
+      },
+      "google": {
+        "apiKey": "${GOOGLE_API_KEY}"
+      },
+      "anthropic": {
+        "apiKey": "${ANTHROPIC_API_KEY}"
+      },
+      "openai": {
+        "apiKey": "${OPENAI_API_KEY}"
+      }
+    }
+  },
+
+  // --------------------------------------------
+  // Telegram 配置
+  // --------------------------------------------
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "botToken": "${TELEGRAM_BOT_TOKEN}",
+      "dmPolicy": "allowlist",
+      "allowFrom": ["6309937609", "8412468762", "7121639624"],
+      "groupPolicy": "disabled"
+    }
+  },
+
+  // --------------------------------------------
+  // 命令配置
+  // --------------------------------------------
+  "commands": {
+    "native": "auto",
+    "text": true
+  }
+}
