@@ -1,0 +1,10 @@
+{
+  "id": "polymarket-mm",
+  "name": "Polymarket Market Maker",
+  "description": "Two-sided quoting for Polymarket liquidity rewards with risk management.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {}
+  }
+}

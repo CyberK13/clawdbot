@@ -1,0 +1,45 @@
+# ============================================
+# Systemd 服务配置: Clawdbot
+# 放置位置: /etc/systemd/system/clawdbot.service
+# ============================================
+
+[Unit]
+Description=Clawdbot AI Assistant Gateway
+Documentation=https://docs.clawd.bot
+After=network.target
+
+[Service]
+Type=simple
+User=clawdbot
+Group=clawdbot
+WorkingDirectory=/home/clawdbot/clawdbot
+
+# 环境文件
+EnvironmentFile=/home/clawdbot/clawdbot/.env
+
+# 启动命令
+ExecStart=/usr/bin/node dist/index.js gateway
+ExecReload=/bin/kill -HUP $MAINPID
+
+# 重启策略
+Restart=always
+RestartSec=10
+
+# 资源限制
+MemoryMax=2G
+CPUQuota=150%
+
+# 安全设置
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/clawdbot/clawdbot/data
+PrivateTmp=true
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clawdbot
+
+[Install]
+WantedBy=multi-user.target

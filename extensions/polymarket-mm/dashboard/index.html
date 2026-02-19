@@ -1,0 +1,1297 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <meta name="theme-color" content="#0a0a1a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>ClawdBot MM</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>"
+    />
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap");
+
+      :root {
+        --bg: #0a0a1a;
+        --panel: #111128;
+        --border: #2a2a4a;
+        --green: #00ff88;
+        --red: #ff4466;
+        --blue: #44aaff;
+        --yellow: #ffcc00;
+        --purple: #aa66ff;
+        --dim: #556;
+        --text: #ccd;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Press Start 2P", monospace;
+        font-size: 10px;
+        min-height: 100vh;
+        overflow-x: hidden;
+      }
+
+      /* ---- Login Screen ---- */
+      #login-screen {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        gap: 20px;
+      }
+      #login-screen h1 {
+        font-size: 16px;
+        color: var(--green);
+      }
+      #login-screen input {
+        background: var(--panel);
+        border: 2px solid var(--border);
+        color: var(--green);
+        font-family: "Press Start 2P", monospace;
+        font-size: 14px;
+        padding: 12px 20px;
+        text-align: center;
+        outline: none;
+        letter-spacing: 8px;
+        width: 200px;
+      }
+      #login-screen input:focus {
+        border-color: var(--green);
+      }
+      #login-error {
+        color: var(--red);
+        font-size: 8px;
+        height: 12px;
+      }
+
+      /* ---- Main Dashboard ---- */
+      #dashboard {
+        display: none;
+        padding: 12px;
+        max-width: 900px;
+        margin: 0 auto;
+      }
+
+      /* ---- Pixel Robot ---- */
+      .robot-scene {
+        display: flex;
+        justify-content: center;
+        align-items: flex-end;
+        height: 180px;
+        margin-bottom: 16px;
+        position: relative;
+        overflow: hidden;
+      }
+      .robot-container {
+        position: relative;
+      }
+
+      /* Robot body via CSS pixel art */
+      .robot {
+        width: 80px;
+        height: 100px;
+        position: relative;
+        image-rendering: pixelated;
+      }
+
+      /* Pixel canvas for robot */
+      #robot-canvas {
+        width: 160px;
+        height: 160px;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+      }
+
+      /* Desk */
+      .desk {
+        width: 200px;
+        height: 8px;
+        background: #554433;
+        position: absolute;
+        bottom: 40px;
+        left: 50%;
+        transform: translateX(-50%);
+        border-top: 2px solid #776655;
+      }
+      .desk-leg-l,
+      .desk-leg-r {
+        width: 6px;
+        height: 40px;
+        background: #443322;
+        position: absolute;
+        bottom: 0;
+      }
+      .desk-leg-l {
+        left: calc(50% - 96px);
+      }
+      .desk-leg-r {
+        left: calc(50% + 90px);
+      }
+
+      /* Monitor on desk */
+      .monitor {
+        width: 56px;
+        height: 44px;
+        background: #222;
+        border: 3px solid #444;
+        position: absolute;
+        bottom: 48px;
+        left: calc(50% + 30px);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      .monitor-screen {
+        width: 100%;
+        height: 100%;
+        background: #001a00;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1px;
+        padding: 3px;
+        align-content: flex-start;
+      }
+      .monitor-screen .line {
+        width: 100%;
+        height: 3px;
+        background: var(--green);
+        opacity: 0.6;
+        animation: screenFlicker 2s infinite;
+      }
+      .monitor-screen .line:nth-child(2n) {
+        width: 70%;
+      }
+      .monitor-screen .line:nth-child(3n) {
+        width: 85%;
+        animation-delay: 0.3s;
+      }
+      .monitor-stand {
+        width: 10px;
+        height: 6px;
+        background: #444;
+        position: absolute;
+        bottom: 42px;
+        left: calc(50% + 53px);
+      }
+
+      @keyframes screenFlicker {
+        0%,
+        100% {
+          opacity: 0.6;
+        }
+        50% {
+          opacity: 0.9;
+        }
+      }
+
+      /* Status indicator */
+      .status-light {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        position: absolute;
+        top: 8px;
+        right: 12px;
+        animation: pulse 2s infinite;
+      }
+      .status-light.on {
+        background: var(--green);
+        box-shadow: 0 0 8px var(--green);
+      }
+      .status-light.off {
+        background: var(--red);
+        box-shadow: 0 0 8px var(--red);
+      }
+      .status-light.idle {
+        background: var(--yellow);
+        box-shadow: 0 0 8px var(--yellow);
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+
+      /* zzz for sleeping */
+      .zzz {
+        position: absolute;
+        top: -10px;
+        right: -20px;
+        font-size: 14px;
+        color: var(--blue);
+        opacity: 0;
+      }
+      .sleeping .zzz {
+        animation: float-zzz 2s infinite;
+      }
+
+      @keyframes float-zzz {
+        0% {
+          opacity: 0;
+          transform: translate(0, 0) scale(0.5);
+        }
+        50% {
+          opacity: 1;
+          transform: translate(5px, -15px) scale(1);
+        }
+        100% {
+          opacity: 0;
+          transform: translate(10px, -30px) scale(0.8);
+        }
+      }
+
+      /* Floor line */
+      .floor {
+        width: 100%;
+        height: 2px;
+        background: var(--border);
+        position: absolute;
+        bottom: 0;
+      }
+
+      /* Stars background */
+      .stars {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 40px;
+        overflow: hidden;
+      }
+      .star {
+        position: absolute;
+        width: 2px;
+        height: 2px;
+        background: #fff;
+        animation: twinkle 3s infinite;
+      }
+      @keyframes twinkle {
+        0%,
+        100% {
+          opacity: 0.2;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+
+      /* ---- Stats Cards ---- */
+      .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .stat-card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        padding: 10px 8px;
+        text-align: center;
+      }
+      .stat-label {
+        font-size: 7px;
+        color: var(--dim);
+        margin-bottom: 6px;
+        text-transform: uppercase;
+      }
+      .stat-value {
+        font-size: 14px;
+        color: var(--green);
+      }
+      .stat-value.negative {
+        color: var(--red);
+      }
+      .stat-value.neutral {
+        color: var(--yellow);
+      }
+
+      /* ---- Orders Panel ---- */
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        margin-bottom: 12px;
+        overflow: hidden;
+      }
+      .panel-header {
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border);
+        font-size: 9px;
+        color: var(--blue);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .panel-body {
+        padding: 8px;
+      }
+
+      /* Order rows */
+      .order-row {
+        display: flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-bottom: 1px solid #1a1a2e;
+        gap: 8px;
+        font-size: 9px;
+        animation: slideIn 0.3s ease;
+      }
+      .order-row:last-child {
+        border-bottom: none;
+      }
+
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateX(-10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+
+      .order-side {
+        font-size: 8px;
+        padding: 2px 6px;
+        border-radius: 2px;
+        font-weight: bold;
+        min-width: 36px;
+        text-align: center;
+      }
+      .order-side.buy {
+        background: #003322;
+        color: var(--green);
+      }
+      .order-side.sell {
+        background: #331122;
+        color: var(--red);
+      }
+
+      .order-price {
+        color: var(--yellow);
+        min-width: 50px;
+      }
+      .order-size {
+        color: var(--text);
+        min-width: 50px;
+      }
+      .order-scoring {
+        font-size: 7px;
+      }
+      .order-scoring.yes {
+        color: var(--green);
+      }
+      .order-scoring.no {
+        color: var(--dim);
+      }
+
+      /* Size bar */
+      .size-bar {
+        height: 6px;
+        background: var(--border);
+        flex: 1;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .size-bar-fill {
+        height: 100%;
+        border-radius: 3px;
+        transition: width 0.5s ease;
+      }
+      .size-bar-fill.buy {
+        background: var(--green);
+      }
+      .size-bar-fill.sell {
+        background: var(--red);
+      }
+
+      /* Markets */
+      .market-row {
+        padding: 6px 8px;
+        border-bottom: 1px solid #1a1a2e;
+        font-size: 8px;
+      }
+      .market-row:last-child {
+        border-bottom: none;
+      }
+      .market-question {
+        color: var(--text);
+        margin-bottom: 3px;
+      }
+      .market-meta {
+        color: var(--dim);
+        font-size: 7px;
+      }
+      .market-meta span {
+        margin-right: 12px;
+      }
+      .market-reward {
+        color: var(--yellow);
+      }
+
+      /* Recent fills */
+      .fill-row {
+        display: flex;
+        gap: 8px;
+        padding: 3px 8px;
+        font-size: 8px;
+        color: var(--dim);
+      }
+      .fill-row .fill-side.buy {
+        color: var(--green);
+      }
+      .fill-row .fill-side.sell {
+        color: var(--red);
+      }
+      .fill-time {
+        color: var(--dim);
+      }
+
+      /* ---- Footer ---- */
+      .footer {
+        text-align: center;
+        padding: 12px;
+        font-size: 7px;
+        color: var(--dim);
+      }
+
+      /* ---- Reward rows ---- */
+      .reward-row {
+        padding: 6px 8px;
+        border-bottom: 1px solid #1a1a2e;
+        font-size: 8px;
+      }
+      .reward-row:last-child {
+        border-bottom: none;
+      }
+      .reward-question {
+        color: var(--text);
+        margin-bottom: 3px;
+      }
+      .reward-meta {
+        color: var(--dim);
+        font-size: 7px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .reward-meta .q-score {
+        color: var(--blue);
+      }
+      .reward-meta .two-sided {
+        color: var(--green);
+      }
+      .reward-meta .one-sided {
+        color: var(--yellow);
+      }
+      .reward-meta .share-est {
+        color: var(--yellow);
+      }
+      .reward-summary {
+        padding: 8px;
+        border-top: 1px solid var(--border);
+        font-size: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+      .reward-summary .est-daily {
+        color: var(--green);
+      }
+      .reward-summary .yesterday {
+        color: var(--blue);
+      }
+      .reward-summary .week-avg {
+        color: var(--purple);
+      }
+
+      /* ---- Empty state ---- */
+      .empty-state {
+        text-align: center;
+        padding: 20px;
+        color: var(--dim);
+        font-size: 8px;
+      }
+
+      /* ---- Responsive ---- */
+      @media (max-width: 768px) {
+        body {
+          font-size: 9px;
+        }
+        #dashboard {
+          padding: 8px;
+        }
+        .stats-grid {
+          grid-template-columns: repeat(2, 1fr);
+          gap: 6px;
+        }
+        .stat-card {
+          padding: 8px 6px;
+        }
+        .stat-value {
+          font-size: 12px;
+        }
+        .stat-label {
+          font-size: 6px;
+        }
+        .robot-scene {
+          height: 140px;
+        }
+        #robot-canvas {
+          width: 120px;
+          height: 120px;
+        }
+        .monitor {
+          width: 44px;
+          height: 36px;
+        }
+        .desk {
+          width: 160px;
+        }
+        .desk-leg-l {
+          left: calc(50% - 76px);
+        }
+        .desk-leg-r {
+          left: calc(50% + 70px);
+        }
+        .order-row {
+          flex-wrap: wrap;
+          gap: 4px;
+          font-size: 8px;
+        }
+        .order-size {
+          min-width: auto;
+        }
+        .size-bar {
+          min-width: 60px;
+        }
+        .market-meta {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 4px;
+        }
+        .market-meta span {
+          margin-right: 6px;
+        }
+        .panel-header {
+          font-size: 8px;
+        }
+      }
+
+      @media (max-width: 400px) {
+        body {
+          font-size: 8px;
+        }
+        .stats-grid {
+          grid-template-columns: repeat(2, 1fr);
+          gap: 4px;
+        }
+        .stat-card {
+          padding: 6px 4px;
+        }
+        .stat-value {
+          font-size: 11px;
+        }
+        .stat-label {
+          font-size: 5px;
+        }
+        .robot-scene {
+          height: 120px;
+        }
+        #robot-canvas {
+          width: 100px;
+          height: 100px;
+        }
+        .monitor {
+          width: 36px;
+          height: 28px;
+          left: calc(50% + 20px);
+        }
+        .monitor-stand {
+          left: calc(50% + 33px);
+        }
+        .desk {
+          width: 140px;
+        }
+        .desk-leg-l {
+          left: calc(50% - 66px);
+        }
+        .desk-leg-r {
+          left: calc(50% + 60px);
+        }
+        .order-row {
+          padding: 4px;
+          font-size: 7px;
+        }
+        .order-side {
+          font-size: 7px;
+          padding: 2px 4px;
+          min-width: 30px;
+        }
+        .market-row {
+          font-size: 7px;
+        }
+        .market-question {
+          font-size: 7px;
+        }
+        .market-meta {
+          font-size: 6px;
+        }
+        #login-screen h1 {
+          font-size: 12px;
+        }
+        #login-screen input {
+          font-size: 12px;
+          padding: 10px 16px;
+          width: 160px;
+        }
+      }
+
+      /* Large screens */
+      @media (min-width: 1200px) {
+        #dashboard {
+          max-width: 1000px;
+        }
+        .stat-value {
+          font-size: 16px;
+        }
+        .robot-scene {
+          height: 200px;
+        }
+      }
+
+      /* Scanline effect */
+      #dashboard::after {
+        content: "";
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        pointer-events: none;
+        background: repeating-linear-gradient(
+          transparent 0px,
+          transparent 2px,
+          rgba(0, 0, 0, 0.08) 2px,
+          rgba(0, 0, 0, 0.08) 4px
+        );
+        z-index: 999;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Login Screen -->
+    <div id="login-screen">
+      <h1>CyberK</h1>
+      <canvas id="login-robot" width="120" height="120" style="image-rendering: pixelated"></canvas>
+      <input type="password" id="password-input" placeholder="***" maxlength="10" autofocus />
+      <div id="login-error"></div>
+    </div>
+
+    <!-- Dashboard -->
+    <div id="dashboard">
+      <!-- Robot Scene -->
+      <div class="robot-scene" id="robot-scene">
+        <div class="stars" id="stars"></div>
+        <div class="robot-container" id="robot-container">
+          <canvas id="robot-canvas" width="160" height="160"></canvas>
+          <span class="zzz">Z</span>
+        </div>
+        <div class="desk"></div>
+        <div class="desk-leg-l"></div>
+        <div class="desk-leg-r"></div>
+        <div class="monitor">
+          <div class="monitor-screen" id="monitor-screen">
+            <div class="line"></div>
+            <div class="line"></div>
+            <div class="line"></div>
+            <div class="line"></div>
+            <div class="line"></div>
+          </div>
+        </div>
+        <div class="monitor-stand"></div>
+        <div class="status-light idle" id="status-light"></div>
+        <div class="floor"></div>
+      </div>
+
+      <!-- Portfolio Overview -->
+      <div class="stats-grid" style="grid-template-columns: 1fr">
+        <div class="stat-card" style="position: relative">
+          <div class="stat-label">PORTFOLIO</div>
+          <div class="stat-value" id="stat-portfolio" style="font-size: 20px">--</div>
+          <div
+            id="portfolio-breakdown"
+            style="font-size: 8px; color: var(--dim); margin-top: 6px; line-height: 1.8"
+          ></div>
+        </div>
+      </div>
+
+      <!-- Stats Row 1 -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">USDC</div>
+          <div class="stat-value neutral" id="stat-balance">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">POSITIONS</div>
+          <div class="stat-value neutral" id="stat-positions">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">TODAY P&L</div>
+          <div class="stat-value" id="stat-daily-pnl">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">REWARDS</div>
+          <div class="stat-value neutral" id="stat-rewards">--</div>
+        </div>
+      </div>
+
+      <!-- Stats Row 2 -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">MARKETS</div>
+          <div class="stat-value neutral" id="stat-markets">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">ORDERS</div>
+          <div class="stat-value neutral" id="stat-orders">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">SCORING</div>
+          <div class="stat-value" id="stat-scoring">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">UPTIME</div>
+          <div class="stat-value neutral" id="stat-uptime">--</div>
+        </div>
+      </div>
+
+      <!-- Live Orders -->
+      <div class="panel">
+        <div class="panel-header">
+          <span>LIVE ORDERS</span>
+          <span id="order-count">0</span>
+        </div>
+        <div class="panel-body" id="orders-list">
+          <div class="empty-state">NO ACTIVE ORDERS</div>
+        </div>
+      </div>
+
+      <!-- Active Markets -->
+      <div class="panel">
+        <div class="panel-header">
+          <span>ACTIVE MARKETS</span>
+          <span id="market-count">0</span>
+        </div>
+        <div class="panel-body" id="markets-list">
+          <div class="empty-state">NO ACTIVE MARKETS</div>
+        </div>
+      </div>
+
+      <!-- Reward Scoring -->
+      <div class="panel">
+        <div class="panel-header">
+          <span>🎯 REWARD SCORING</span>
+          <span id="reward-scoring-stat">--</span>
+        </div>
+        <div class="panel-body" id="rewards-list">
+          <div class="empty-state">NO REWARD DATA</div>
+        </div>
+      </div>
+
+      <!-- Recent Fills -->
+      <div class="panel">
+        <div class="panel-header">
+          <span>RECENT FILLS</span>
+        </div>
+        <div class="panel-body" id="fills-list">
+          <div class="empty-state">NO RECENT FILLS</div>
+        </div>
+      </div>
+
+      <div class="footer">CLAWDBOT MM v1.0 &bull; REFRESHING EVERY 5s</div>
+    </div>
+
+    <script>
+      // ---- State ----
+      let apiKey = localStorage.getItem("mm_key") || "";
+      let robotState = "idle"; // idle | working | sleeping | error
+
+      // ---- Login ----
+      const loginScreen = document.getElementById("login-screen");
+      const dashboard = document.getElementById("dashboard");
+      const pwInput = document.getElementById("password-input");
+      const loginError = document.getElementById("login-error");
+
+      if (apiKey) {
+        verifyAndEnter(apiKey);
+      } else {
+        drawLoginRobot();
+      }
+
+      pwInput.addEventListener("keydown", async (e) => {
+        if (e.key === "Enter") {
+          const val = pwInput.value.trim();
+          if (!val) return;
+          verifyAndEnter(val);
+        }
+      });
+
+      async function verifyAndEnter(key) {
+        try {
+          const r = await fetch("/api/auth?key=" + encodeURIComponent(key));
+          const d = await r.json();
+          if (d.ok) {
+            apiKey = key;
+            localStorage.setItem("mm_key", key);
+            loginScreen.style.display = "none";
+            dashboard.style.display = "block";
+            initDashboard();
+          } else {
+            loginError.textContent = "WRONG PASSWORD";
+            pwInput.value = "";
+            pwInput.focus();
+            localStorage.removeItem("mm_key");
+          }
+        } catch {
+          loginError.textContent = "CONNECTION FAILED";
+        }
+      }
+
+      // ---- Dashboard ----
+      function initDashboard() {
+        generateStars();
+        initRobotCanvas();
+        fetchAll();
+        setInterval(fetchAll, 5000);
+        requestAnimationFrame(animateRobot);
+      }
+
+      async function fetchAll() {
+        try {
+          const [statusR, ordersR, marketsR, rewardsR] = await Promise.all([
+            fetch("/api/status?key=" + apiKey),
+            fetch("/api/orders?key=" + apiKey),
+            fetch("/api/markets?key=" + apiKey),
+            fetch("/api/rewards?key=" + apiKey),
+          ]);
+          const status = await statusR.json();
+          const orders = await ordersR.json();
+          const markets = await marketsR.json();
+          const rewards = await rewardsR.json();
+          updateStatus(status);
+          updateOrders(orders);
+          updateMarkets(markets);
+          updateRewards(rewards);
+        } catch (e) {
+          console.error("Fetch error:", e);
+        }
+      }
+
+      function updateStatus(s) {
+        const light = document.getElementById("status-light");
+        if (s.killSwitch) {
+          light.className = "status-light off";
+          robotState = "error";
+        } else if (s.running) {
+          light.className = "status-light on";
+          robotState = s.liveOrders > 0 ? "working" : "idle";
+        } else {
+          light.className = "status-light idle";
+          robotState = "sleeping";
+        }
+
+        const container = document.getElementById("robot-container");
+        container.className =
+          robotState === "sleeping" ? "robot-container sleeping" : "robot-container";
+
+        // Portfolio total
+        const portfolio = s.portfolio || s.balance + (s.positionValue || 0);
+        const posVal = s.positionValue || 0;
+        const portfolioEl = document.getElementById("stat-portfolio");
+        portfolioEl.textContent = "$" + fmt(portfolio);
+        portfolioEl.className =
+          "stat-value" + (portfolio >= (s.capital || portfolio) ? "" : " negative");
+
+        // Breakdown text
+        const bd = document.getElementById("portfolio-breakdown");
+        const parts = ["USDC $" + fmt(s.balance)];
+        if (posVal > 0) parts.push("POSITIONS $" + fmt(posVal));
+        bd.textContent = parts.join("  ·  ");
+
+        setText("stat-balance", "$" + fmt(s.balance));
+        setText("stat-positions", posVal > 0 ? "$" + fmt(posVal) : "--");
+        setValColor("stat-daily-pnl", s.dailyPnl);
+        setText("stat-rewards", "$" + fmt(s.totalRewards));
+        setText("stat-markets", s.activeMarkets + "/" + s.maxMarkets);
+        setText("stat-orders", "" + s.liveOrders);
+
+        const scoringEl = document.getElementById("stat-scoring");
+        scoringEl.textContent = s.scoringOrders + "/" + s.liveOrders;
+        scoringEl.className =
+          "stat-value" + (s.liveOrders > 0 && s.scoringOrders === s.liveOrders ? "" : " neutral");
+
+        if (s.startedAt) {
+          const ms = Date.now() - s.startedAt;
+          const h = Math.floor(ms / 3600000);
+          const m = Math.floor((ms % 3600000) / 60000);
+          setText("stat-uptime", h + "h " + m + "m");
+        } else {
+          setText("stat-uptime", "--");
+        }
+
+        // Update monitor screen color based on state
+        const screen = document.getElementById("monitor-screen");
+        screen.style.background = robotState === "error" ? "#1a0000" : "#001a00";
+        const lines = screen.querySelectorAll(".line");
+        lines.forEach(
+          (l) => (l.style.background = robotState === "error" ? "var(--red)" : "var(--green)"),
+        );
+      }
+
+      function updateOrders(data) {
+        const list = document.getElementById("orders-list");
+        const countEl = document.getElementById("order-count");
+        const orders = data.orders || [];
+        countEl.textContent = orders.length;
+
+        if (orders.length === 0) {
+          list.innerHTML = '<div class="empty-state">NO ACTIVE ORDERS</div>';
+          return;
+        }
+
+        const maxSize = Math.max(...orders.map((o) => o.size), 1);
+
+        list.innerHTML = orders
+          .map(
+            (o) => `
+    <div class="order-row">
+      <span class="order-side ${o.side === "BUY" ? "buy" : "sell"}">${o.side}</span>
+      <span class="order-price">$${o.price.toFixed(3)}</span>
+      <span class="order-size">${o.size.toFixed(0)} shares</span>
+      <div class="size-bar">
+        <div class="size-bar-fill ${o.side === "BUY" ? "buy" : "sell"}"
+             style="width:${((o.size / maxSize) * 100).toFixed(0)}%"></div>
+      </div>
+      <span class="order-scoring ${o.scoring ? "yes" : "no"}">${o.scoring ? "SCORING" : "NO SCORE"}</span>
+    </div>
+  `,
+          )
+          .join("");
+      }
+
+      function updateMarkets(data) {
+        const list = document.getElementById("markets-list");
+        const countEl = document.getElementById("market-count");
+        const markets = data.markets || [];
+        const positions = data.positions || [];
+        countEl.textContent = markets.length;
+
+        let html = "";
+
+        if (markets.length > 0) {
+          html += markets
+            .map(
+              (m, i) => `
+      <div class="market-row">
+        <div class="market-question">${i + 1}. ${m.question.slice(0, 60)}${m.question.length > 60 ? "..." : ""}</div>
+        <div class="market-meta">
+          <span class="market-reward">$${m.rewardRate.toFixed(2)}/day</span>
+          <span>Score: ${m.score.toFixed(1)}</span>
+          ${m.tokens.map((t) => `<span>${t.outcome}: $${t.price.toFixed(3)}</span>`).join("")}
+        </div>
+      </div>
+    `,
+            )
+            .join("");
+        }
+
+        // Show positions with value
+        const activePositions = positions.filter((p) => p.shares > 0);
+        if (activePositions.length > 0) {
+          html +=
+            '<div style="border-top:1px solid var(--border);padding:6px 8px;font-size:8px;color:var(--blue)">POSITIONS</div>';
+          html += activePositions
+            .map((p) => {
+              const value = p.shares * p.avgEntry;
+              return `
+        <div class="market-row" style="display:flex;justify-content:space-between;align-items:center">
+          <span>${p.outcome} <span style="color:var(--dim)">${p.tokenId}...</span></span>
+          <span>
+            <span style="color:var(--yellow)">${p.shares.toFixed(1)}</span> shares
+            @ $${p.avgEntry.toFixed(3)}
+            = <span style="color:var(--green)">$${value.toFixed(2)}</span>
+          </span>
+        </div>`;
+            })
+            .join("");
+        }
+
+        if (!html) {
+          html = '<div class="empty-state">NO ACTIVE MARKETS</div>';
+        }
+
+        list.innerHTML = html;
+      }
+
+      function updateRewards(data) {
+        const list = document.getElementById("rewards-list");
+        const statEl = document.getElementById("reward-scoring-stat");
+
+        if (!data || !data.markets || data.markets.length === 0) {
+          list.innerHTML = '<div class="empty-state">NO REWARD DATA</div>';
+          statEl.textContent = "--";
+          return;
+        }
+
+        statEl.textContent = data.scoring.scoring + "/" + data.scoring.total + " SCORING";
+
+        let html = "";
+        data.markets.forEach((m, i) => {
+          const flag = m.twoSided
+            ? '<span class="two-sided">✅ TWO-SIDED</span>'
+            : '<span class="one-sided">⚠️ ONE-SIDED</span>';
+          html += `
+      <div class="reward-row">
+        <div class="reward-question">${i + 1}. ${m.question.slice(0, 50)}${m.question.length > 50 ? "..." : ""}</div>
+        <div class="reward-meta">
+          <span class="q-score">Q_min: ${m.qMin.toFixed(1)}</span>
+          <span>Q₁: ${m.qOne.toFixed(1)}</span>
+          <span>Q₂: ${m.qTwo.toFixed(1)}</span>
+          ${flag}
+          <span>Rate: $${m.dailyRate.toFixed(2)}/day</span>
+          <span class="share-est">Est: ~$${m.estimatedShare.toFixed(3)}/day</span>
+        </div>
+      </div>`;
+        });
+
+        html += '<div class="reward-summary">';
+        html += '<span class="est-daily">💰 EST: ~$' + fmt(data.totalEstDaily) + "/day</span>";
+        if (data.yesterdayActual !== null) {
+          html += '<span class="yesterday">📈 Yesterday: $' + fmt(data.yesterdayActual) + "</span>";
+        }
+        if (data.weekAvg > 0) {
+          html += '<span class="week-avg">📊 7d avg: $' + fmt(data.weekAvg) + "/day</span>";
+        }
+        html += "</div>";
+
+        list.innerHTML = html;
+      }
+
+      // ---- Helpers ----
+      function setText(id, text) {
+        document.getElementById(id).textContent = text;
+      }
+      function fmt(n) {
+        return (n || 0).toFixed(2);
+      }
+      function setValColor(id, val) {
+        const el = document.getElementById(id);
+        el.textContent = (val >= 0 ? "+" : "") + "$" + fmt(val);
+        el.className = "stat-value" + (val > 0 ? "" : val < 0 ? " negative" : " neutral");
+      }
+
+      // ---- Stars ----
+      function generateStars() {
+        const container = document.getElementById("stars");
+        for (let i = 0; i < 30; i++) {
+          const star = document.createElement("div");
+          star.className = "star";
+          star.style.left = Math.random() * 100 + "%";
+          star.style.top = Math.random() * 100 + "%";
+          star.style.animationDelay = Math.random() * 3 + "s";
+          star.style.animationDuration = 2 + Math.random() * 3 + "s";
+          container.appendChild(star);
+        }
+      }
+
+      // ---- Pixel Robot (Canvas) ----
+      let robotCanvas, robotCtx;
+      let robotFrame = 0;
+
+      function initRobotCanvas() {
+        robotCanvas = document.getElementById("robot-canvas");
+        robotCtx = robotCanvas.getContext("2d");
+        robotCtx.imageSmoothingEnabled = false;
+      }
+
+      function drawLoginRobot() {
+        const c = document.getElementById("login-robot");
+        const ctx = c.getContext("2d");
+        ctx.imageSmoothingEnabled = false;
+        drawRobotFrame(ctx, 60, 60, 0, "idle", 3);
+      }
+
+      function animateRobot(ts) {
+        if (!robotCtx) {
+          requestAnimationFrame(animateRobot);
+          return;
+        }
+        robotFrame++;
+
+        robotCtx.clearRect(0, 0, 160, 160);
+        const frame = Math.floor(robotFrame / 15) % 4;
+        drawRobotFrame(robotCtx, 80, 90, frame, robotState, 4);
+
+        requestAnimationFrame(animateRobot);
+      }
+
+      function drawRobotFrame(ctx, cx, cy, frame, state, scale) {
+        const s = scale || 4;
+        function px(x, y, color) {
+          ctx.fillStyle = color;
+          ctx.fillRect(cx + x * s, cy + y * s, s, s);
+        }
+
+        // Colors — bald guy
+        const skin = "#e8b87a";
+        const skinDark = "#c99455";
+        const skinLight = "#f5d5a0";
+        const eyeW = "#fff";
+        const pupil = state === "error" ? "#ff4466" : "#2a2a2a";
+        const shirt = "#333842";
+        const shirtLight = "#484f5c";
+        const hand = skin;
+
+        // Bald head — round top
+        px(-1, -10, skin);
+        px(0, -10, skin);
+        px(1, -10, skin);
+        for (let x = -2; x <= 2; x++) px(x, -9, skin);
+        for (let x = -3; x <= 3; x++) px(x, -8, skin);
+        // Shine on bald head
+        px(0, -10, skinLight);
+        px(1, -9, skinLight);
+        px(-1, -9, skinLight);
+
+        // Face
+        for (let y = -7; y <= -4; y++) {
+          for (let x = -3; x <= 3; x++) {
+            px(x, y, x === -3 || x === 3 ? skinDark : skin);
+          }
+        }
+
+        // Ears
+        px(-4, -6, skinDark);
+        px(4, -6, skinDark);
+
+        // Eyes
+        if (state === "sleeping") {
+          px(-2, -6, "#555");
+          px(-1, -6, "#555");
+          px(1, -6, "#555");
+          px(2, -6, "#555");
+        } else {
+          // Eye whites + pupils
+          px(-2, -7, eyeW);
+          px(-1, -7, eyeW);
+          px(2, -7, eyeW);
+          px(1, -7, eyeW);
+          px(-2, -6, pupil);
+          px(-1, -6, eyeW);
+          px(2, -6, pupil);
+          px(1, -6, eyeW);
+          // Blink
+          if (frame === 3) {
+            px(-2, -7, skin);
+            px(-1, -7, skin);
+            px(2, -7, skin);
+            px(1, -7, skin);
+          }
+        }
+
+        // Nose
+        px(0, -5, skinDark);
+
+        // Mouth
+        if (state === "error") {
+          px(-1, -4, "#cc3344");
+          px(0, -4, "#cc3344");
+          px(1, -4, "#cc3344");
+        } else if (state === "sleeping") {
+          px(0, -4, skinDark);
+        } else {
+          px(-1, -4, "#c66");
+          px(0, -4, skinDark);
+          px(1, -4, "#c66");
+        }
+
+        // Neck
+        px(-1, -3, skinDark);
+        px(0, -3, skin);
+        px(1, -3, skinDark);
+
+        // Shirt / body
+        for (let x = -4; x <= 4; x++) {
+          for (let y = -2; y <= 2; y++) {
+            px(x, y, x === -4 || x === 4 ? shirtLight : shirt);
+          }
+        }
+        // Collar
+        px(-1, -2, shirtLight);
+        px(0, -2, skin);
+        px(1, -2, shirtLight);
+
+        // Arms — animate typing
+        const armOffset = state === "working" ? (frame % 2 === 0 ? 0 : -1) : 0;
+        // Left arm
+        px(-5, -1, shirtLight);
+        px(-5, 0, shirtLight);
+        px(-5, 1, shirtLight);
+        px(-6, 2 + armOffset, hand);
+        px(-5, 2 + armOffset, hand);
+        // Right arm
+        px(5, -1, shirtLight);
+        px(5, 0, shirtLight);
+        px(5, 1, shirtLight);
+        px(6, 2 - armOffset, hand);
+        px(5, 2 - armOffset, hand);
+
+        // Legs (seated)
+        for (let x = -3; x <= -1; x++) {
+          px(x, 3, "#2a2e36");
+          px(x, 4, "#2a2e36");
+        }
+        for (let x = 1; x <= 3; x++) {
+          px(x, 3, "#2a2e36");
+          px(x, 4, "#2a2e36");
+        }
+
+        // Shoes
+        px(-3, 5, "#444");
+        px(-2, 5, "#444");
+        px(-1, 5, "#444");
+        px(1, 5, "#444");
+        px(2, 5, "#444");
+        px(3, 5, "#444");
+
+        // ZZZ for sleeping
+        if (state === "sleeping") {
+          const zOff = frame % 2;
+          px(4, -9 + zOff, "#8888ff");
+          px(5, -9 + zOff, "#8888ff");
+          px(5, -10 + zOff, "#6666cc");
+        }
+      }
+    </script>
+  </body>
+</html>

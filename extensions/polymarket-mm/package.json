@@ -1,0 +1,14 @@
+{
+  "name": "@openclaw/polymarket-mm",
+  "version": "2026.2.13",
+  "description": "Polymarket market-making & liquidity rewards bot",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

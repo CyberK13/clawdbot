@@ -1,0 +1,231 @@
+// ---------------------------------------------------------------------------
+// Order Manager: Order lifecycle — place, cancel, refresh, track fills
+// ---------------------------------------------------------------------------
+
+import type { TickSize } from "@polymarket/clob-client";
+import { OrderType, Side } from "@polymarket/clob-client";
+import type { PluginLogger } from "../../src/plugins/types.js";
+import type { PolymarketClient } from "./client.js";
+import type { StateManager } from "./state.js";
+import type { MmConfig, MmMarket, TargetQuote, TrackedOrder } from "./types.js";
+
+export class OrderManager {
+  private logger: PluginLogger;
+
+  constructor(
+    private client: PolymarketClient,
+    private state: StateManager,
+    private config: MmConfig,
+    logger: PluginLogger,
+  ) {
+    this.logger = logger;
+  }
+
+  /**
+   * Refresh orders for a market: compare targets with live orders,
+   * cancel stale ones, place new ones.
+   */
+  async refreshMarketOrders(market: MmMarket, targets: TargetQuote[]): Promise<void> {
+    const liveOrders = this.state.getMarketOrders(market.conditionId);
+    const tick = parseFloat(market.tickSize);
+
+    // Classify live orders: keep or cancel
+    const toCancel: string[] = [];
+    const matched = new Set<string>(); // target indices that are matched
+
+    for (const live of liveOrders) {
+      // Find a matching target (same token, side, close price)
+      const matchIdx = targets.findIndex(
+        (t, idx) =>
+          !matched.has(`${idx}`) &&
+          t.tokenId === live.tokenId &&
+          t.side === live.side &&
+          Math.abs(t.price - live.price) < tick * 1.5, // within ~1 tick
+      );
+
+      if (matchIdx >= 0) {
+        matched.add(`${matchIdx}`);
+        // Order is still valid, keep it
+      } else {
+        // Order is stale, cancel it
+        toCancel.push(live.orderId);
+      }
+    }
+
+    // Cancel stale orders
+    if (toCancel.length > 0) {
+      try {
+        await this.client.cancelOrders(toCancel);
+        for (const id of toCancel) {
+          this.state.removeOrder(id);
+        }
+        this.logger.info(
+          `Cancelled ${toCancel.length} stale orders on ${market.question.slice(0, 30)}`,
+        );
+      } catch (err: any) {
+        this.logger.error(`Failed to cancel orders: ${err.message}`);
+      }
+    }
+
+    // Place new orders for unmatched targets
+    const toPlace = targets.filter((_, idx) => !matched.has(`${idx}`));
+    for (const target of toPlace) {
+      await this.placeOrder(market, target);
+    }
+  }
+
+  /** Place a single limit order. */
+  async placeOrder(market: MmMarket, target: TargetQuote): Promise<TrackedOrder | null> {
+    try {
+      const result = await this.client.createAndPostOrder(
+        {
+          tokenID: target.tokenId,
+          price: target.price,
+          size: target.size,
+          side: target.side === "BUY" ? Side.BUY : Side.SELL,
+          feeRateBps: 0,
+        },
+        {
+          tickSize: market.tickSize,
+          negRisk: market.negRisk,
+        },
+        OrderType.GTC,
+        true, // postOnly: critical for MM to avoid crossing spread
+      );
+
+      const orderId = result?.orderID || result?.orderHashes?.[0];
+      if (!orderId) {
+        this.logger.warn(`Order placed but no ID returned: ${JSON.stringify(result)}`);
+        return null;
+      }
+
+      const tracked: TrackedOrder = {
+        orderId,
+        tokenId: target.tokenId,
+        conditionId: market.conditionId,
+        side: target.side,
+        price: target.price,
+        originalSize: target.size,
+        filledSize: 0,
+        status: "live",
+        scoring: false, // will be checked separately
+        placedAt: Date.now(),
+        level: target.level,
+      };
+
+      this.state.trackOrder(tracked);
+      return tracked;
+    } catch (err: any) {
+      // postOnly rejection is expected when our price crosses the spread
+      if (err.message?.includes("post only")) {
+        this.logger.info(
+          `PostOnly rejected: ${target.side} ${target.size.toFixed(1)} @ ${target.price} (would cross spread)`,
+        );
+      } else {
+        this.logger.error(
+          `Failed to place order ${target.side} ${target.size.toFixed(1)} @ ${target.price}: ${err.message}`,
+        );
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Detect fills by comparing tracked orders with exchange state.
+   * Returns list of fills detected.
+   */
+  async detectFills(): Promise<Array<{ order: TrackedOrder; fillSize: number }>> {
+    const fills: Array<{ order: TrackedOrder; fillSize: number }> = [];
+
+    try {
+      const openOrders = await this.client.getOpenOrders();
+      const openIds = new Set(openOrders.map((o) => o.id));
+      const trackedOrders = this.state.getTrackedOrders();
+
+      for (const tracked of trackedOrders) {
+        if (tracked.status !== "live") continue;
+
+        const onExchange = openOrders.find((o) => o.id === tracked.orderId);
+
+        if (!onExchange) {
+          // Order disappeared → fully filled or cancelled externally
+          const fillSize = tracked.originalSize - tracked.filledSize;
+          if (fillSize > 0) {
+            fills.push({ order: tracked, fillSize });
+            tracked.status = "filled";
+            tracked.filledSize = tracked.originalSize;
+          } else {
+            tracked.status = "cancelled";
+          }
+          this.state.trackOrder(tracked); // update status
+        } else {
+          // Check for partial fills
+          const sizeMatched = parseFloat(onExchange.size_matched || "0");
+          if (sizeMatched > tracked.filledSize) {
+            const newFill = sizeMatched - tracked.filledSize;
+            fills.push({ order: tracked, fillSize: newFill });
+            tracked.filledSize = sizeMatched;
+            this.state.trackOrder(tracked);
+          }
+        }
+      }
+    } catch (err: any) {
+      this.logger.error(`Fill detection failed: ${err.message}`);
+    }
+
+    return fills;
+  }
+
+  /** Cancel all orders for a specific market. */
+  async cancelMarketOrders(conditionId: string): Promise<void> {
+    try {
+      await this.client.cancelMarketOrders(conditionId);
+      const orders = this.state.getMarketOrders(conditionId);
+      for (const o of orders) {
+        this.state.removeOrder(o.orderId);
+      }
+      this.logger.info(`Cancelled all orders for market ${conditionId.slice(0, 10)}…`);
+    } catch (err: any) {
+      this.logger.error(`Failed to cancel market orders: ${err.message}`);
+    }
+  }
+
+  /** Cancel ALL open orders (emergency). */
+  async cancelAllOrders(): Promise<void> {
+    try {
+      await this.client.cancelAll();
+      const tracked = this.state.getTrackedOrders();
+      for (const o of tracked) {
+        this.state.removeOrder(o.orderId);
+      }
+      this.logger.info("Cancelled ALL orders");
+    } catch (err: any) {
+      this.logger.error(`Failed to cancel all orders: ${err.message}`);
+    }
+  }
+
+  /** Cancel orders on a specific side for a market (for inventory management). */
+  async cancelSideOrders(conditionId: string, side: "BUY" | "SELL"): Promise<void> {
+    const orders = this.state.getMarketOrders(conditionId).filter((o) => o.side === side);
+
+    if (orders.length === 0) return;
+
+    const ids = orders.map((o) => o.orderId);
+    try {
+      await this.client.cancelOrders(ids);
+      for (const id of ids) {
+        this.state.removeOrder(id);
+      }
+      this.logger.info(
+        `Cancelled ${ids.length} ${side} orders on market ${conditionId.slice(0, 10)}…`,
+      );
+    } catch (err: any) {
+      this.logger.error(`Failed to cancel ${side} orders: ${err.message}`);
+    }
+  }
+
+  /** Get count of live tracked orders. */
+  getLiveOrderCount(): number {
+    return this.state.getTrackedOrders().filter((o) => o.status === "live").length;
+  }
+}

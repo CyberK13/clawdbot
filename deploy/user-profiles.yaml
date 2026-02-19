@@ -1,0 +1,117 @@
+# ============================================
+# Clawdbot 用户浏览器配置
+# 映射 Telegram 用户 ID → Chrome Profile
+# ============================================
+#
+# 说明:
+# - 每个 TG 用户分配一个 Chrome Profile
+# - 浏览器操作会使用对应用户的 Profile
+# - Profile 中预先登录好 X、Google 等账号
+#
+# Chrome Profile 路径:
+# - Linux: ~/.config/google-chrome/Profile X/
+# - macOS: ~/Library/Application Support/Google/Chrome/Profile X/
+# - Windows: %LOCALAPPDATA%\Google\Chrome\User Data\Profile X/
+#
+# 查看现有 Profile:
+#   chrome://version/ → "Profile Path"
+#
+# ============================================
+
+# 默认配置（未匹配用户使用）
+defaults:
+  browser:
+    profile: "Default" # Chrome 默认 Profile
+    headless: true # 无头模式（VPS 上推荐）
+    timeout: 30000 # 页面加载超时 (ms)
+
+# ============================================
+# 用户映射配置
+# ============================================
+users:
+  # --------------------------------------------
+  # 你自己 - 主账号
+  # --------------------------------------------
+  "6309937609":
+    name: "KC"
+    browser:
+      profile: "Profile 1" # Chrome Profile 名称
+      # 或使用完整路径:
+      # profilePath: "/home/linuxuser/.config/google-chrome/Profile 1"
+
+    # 预登录的账号（仅作记录，不存储密码）
+    accounts:
+      google: "klchen0113@gmail.com"
+      x: "@CyberK013"
+      reddit: "u/Quirky_Commission258"
+
+    # 该用户的特殊设置
+    settings:
+      model: "minimax/MiniMax-M2.1" # 可覆盖默认模型
+      maxTokens: 8192
+
+  # --------------------------------------------
+  # Jacky - 朋友 1
+  # --------------------------------------------
+  "8412468762":
+    name: "Jacky"
+    browser:
+      profile: "Profile 2"
+    accounts:
+      google: "qiang.xie808@gmail.com"
+      x: "@qing366494"
+    settings:
+      model: "minimax/MiniMax-M2.1" # 可切换任意模型
+      maxTokens: 8192
+
+  # --------------------------------------------
+  # 朋友 2 - 研究助手
+  # --------------------------------------------
+  # "填写朋友2的TG_ID":
+  #   name: "朋友2昵称"
+  #   browser:
+  #     profile: "Profile 3"
+  #   accounts:
+  #     google: "friend2@gmail.com"
+  #   settings:
+  #     model: "google/gemini-3-flash-preview"
+
+# ============================================
+# 浏览器全局配置
+# ============================================
+browser:
+  # Chrome 可执行文件路径（通常自动检测）
+  # executablePath: "/usr/bin/google-chrome"
+
+  # 用户数据目录（包含所有 Profile）
+  userDataDir: "/home/linuxuser/.config/google-chrome"
+
+  # 全局浏览器参数
+  args:
+    - "--no-sandbox"
+    - "--disable-setuid-sandbox"
+    - "--disable-dev-shm-usage"
+    - "--disable-gpu"
+
+  # 视窗大小
+  viewport:
+    width: 1920
+    height: 1080
+
+# ============================================
+# 安全提示
+# ============================================
+#
+# ⚠️ 不要在此文件中存储密码！
+#
+# 正确做法:
+# 1. 在 VPS 上手动启动 Chrome（非 headless）
+#    google-chrome --user-data-dir=/home/linuxuser/.config/google-chrome --profile-directory="Profile 1"
+#
+# 2. 手动登录各网站（X, Google, Reddit 等）
+#
+# 3. Chrome 会记住登录状态
+#
+# 4. Clawdbot 使用该 Profile 时自动带登录态
+#
+# ============================================

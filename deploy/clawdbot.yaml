@@ -1,0 +1,269 @@
+# ============================================
+# Clawdbot 主配置文件
+# 域名: clawdbot.cyberoracle.net
+# ============================================
+
+# --------------------------------------------
+# 会话配置 (多用户隔离)
+# --------------------------------------------
+session:
+  # per-channel-peer: 每个用户独立会话
+  dmScope: "per-channel-peer"
+
+# --------------------------------------------
+# Agent 配置
+# --------------------------------------------
+agents:
+  defaults:
+    # 默认模型配置
+    model:
+      primary: "minimax/MiniMax-M2.1"
+      fallbacks:
+        - "google/gemini-2.0-flash"
+        - "deepseek/deepseek-chat"
+
+    # 模型白名单 + 别名 (用于 /model 切换)
+    models:
+      # MiniMax 系列
+      "minimax/MiniMax-M2.1":
+        alias: "minimax"
+      "minimax/MiniMax-M2.1-lightning":
+        alias: "minimax-fast"
+
+      # Google Gemini 系列
+      "google/gemini-2.0-flash":
+        alias: "gemini"
+      "google/gemini-2.5-pro-preview":
+        alias: "gemini-pro"
+      "google/gemini-2.5-flash-preview":
+        alias: "gemini-flash"
+
+      # DeepSeek 系列
+      "deepseek/deepseek-chat":
+        alias: "deepseek"
+      "deepseek/deepseek-reasoner":
+        alias: "deepseek-r1"
+
+  # 每用户独立 agent
+  list:
+    - id: "user1"
+      name: "Kyle"
+      workspace: "~/clawd-user1"
+      default: true
+    - id: "user2"
+      name: "Jack"
+      workspace: "~/clawd-user2"
+    - id: "user3"
+      name: "Jing"
+      workspace: "~/clawd-user3"
+
+# --------------------------------------------
+# 路由绑定 (TG User ID → Agent)
+# --------------------------------------------
+bindings:
+  - agentId: "user1"
+    match:
+      channel: "telegram"
+      peer:
+        kind: "dm"
+        id: "6309937609"
+  - agentId: "user2"
+    match:
+      channel: "telegram"
+      peer:
+        kind: "dm"
+        id: "8412468762"
+  - agentId: "user3"
+    match:
+      channel: "telegram"
+      peer:
+        kind: "dm"
+        id: "7121639624"
+
+  # WhatsApp 绑定
+  - agentId: "user1"
+    match:
+      channel: "whatsapp"
+      peer:
+        kind: "dm"
+        id: "+61459188816" # Kyle 手机号（请替换）
+  # - agentId: "user2"
+  #   match:
+  #     channel: "whatsapp"
+  #     peer:
+  #       kind: "dm"
+  #       id: ""    # Jack 手机号（待填）
+  - agentId: "user3"
+    match:
+      channel: "whatsapp"
+      peer:
+        kind: "dm"
+        id: "+61452608816" # Jing 手机号（请替换）
+
+# --------------------------------------------
+# 模型 Provider 配置
+# --------------------------------------------
+models:
+  mode: "merge"
+  providers:
+    # MiniMax 配置
+    minimax:
+      baseUrl: "https://api.minimax.io/anthropic"
+      apiKey: "${MINIMAX_API_KEY}"
+      api: "anthropic-messages"
+      models:
+        - id: "MiniMax-M2.1"
+          name: "MiniMax M2.1"
+          reasoning: false
+          input: ["text"]
+          cost:
+            input: 15
+            output: 60
+            cacheRead: 2
+            cacheWrite: 10
+          contextWindow: 200000
+          maxTokens: 8192
+        - id: "MiniMax-M2.1-lightning"
+          name: "MiniMax M2.1 Lightning"
+          reasoning: false
+          input: ["text"]
+          cost:
+            input: 15
+            output: 90
+          contextWindow: 200000
+          maxTokens: 8192
+
+    # DeepSeek 配置 (OpenAI 兼容)
+    deepseek:
+      baseUrl: "https://api.deepseek.com/v1"
+      apiKey: "${DEEPSEEK_API_KEY}"
+      api: "openai-completions"
+      models:
+        - id: "deepseek-chat"
+          name: "DeepSeek V3"
+          reasoning: false
+          input: ["text"]
+          cost:
+            input: 0.27
+            output: 1.10
+          contextWindow: 64000
+          maxTokens: 8192
+        - id: "deepseek-reasoner"
+          name: "DeepSeek R1"
+          reasoning: true
+          input: ["text"]
+          cost:
+            input: 0.55
+            output: 2.19
+          contextWindow: 64000
+          maxTokens: 8192
+
+    # Google Gemini (原生支持，只需 API Key)
+    google:
+      apiKey: "${GOOGLE_API_KEY}"
+
+# --------------------------------------------
+# Telegram 频道配置
+# --------------------------------------------
+channels:
+  telegram:
+    enabled: true
+    botToken: "${TELEGRAM_BOT_TOKEN}"
+
+    # DM 访问策略: allowlist = 仅白名单用户
+    dmPolicy: "allowlist"
+
+    # 授权用户列表 (Telegram User ID)
+    # 获取方法: DM 你的 bot，查看日志中的 from.id
+    # 或者 DM @userinfobot 获取你的 ID
+    allowFrom:
+      - "6309937609" # Kyle
+      - "8412468762" # Jack
+      - "7121639624" # Jing
+
+    # 群组策略 (可选)
+    groupPolicy: "disabled" # 暂时禁用群组
+
+    # 消息限制
+    textChunkLimit: 4000
+    mediaMaxMb: 10
+
+  # --------------------------------------------
+  # WhatsApp 频道配置
+  # --------------------------------------------
+  whatsapp:
+    enabled: true
+
+    # DM 访问策略: allowlist = 仅白名单用户
+    dmPolicy: "allowlist"
+
+    # 授权用户列表 (E.164 格式手机号，带国家码)
+    # 例如中国: +86..., 美国: +1...
+    allowFrom:
+      - "+61459188816" # Kyle
+      - "+61452608816" # Jing
+      # - ""              # Jack（待填）
+
+    # 群组策略
+    groupPolicy: "disabled"
+
+    # 发送已读回执（蓝色双勾）
+    sendReadReceipts: true
+
+    # 消息限制
+    textChunkLimit: 4000
+    mediaMaxMb: 50
+
+# --------------------------------------------
+# 命令配置
+# --------------------------------------------
+commands:
+  native: "auto" # 自动注册原生命令
+  text: true # 启用文本命令
+  config: false # 禁用 /config (安全)
+  debug: false # 禁用 /debug (安全)
+
+# --------------------------------------------
+# 消息配置
+# --------------------------------------------
+messages:
+  # 可选: 添加响应前缀
+  # responsePrefix: "[CyberOracle]"
+
+  # 群聊历史限制
+  groupChat:
+    historyLimit: 50
+
+# --------------------------------------------
+# Webhook / Gmail 配置
+# --------------------------------------------
+hooks:
+  enabled: true
+  token: "${CLAWDBOT_HOOK_TOKEN}"
+  path: "/hooks"
+  presets: ["gmail"]
+
+  # Gmail 专用配置
+  gmail:
+    account: "${GMAIL_ACCOUNT}" # Jing 的 Gmail 地址
+    model: "google/gemini-2.0-flash" # Gmail 处理用低成本模型
+    thinking: "off"
+
+  # 路由映射
+  mappings:
+    # Jing 的 Gmail → Telegram 通知
+    - match: { path: "gmail" }
+      action: "agent"
+      agentId: "user3" # 绑定到 Jing 的 agent
+      wakeMode: "now"
+      name: "Gmail"
+      sessionKey: "hook:gmail:{{messages[0].id}}"
+      messageTemplate: |
+        📧 新邮件
+        发件人: {{messages[0].from}}
+        主题: {{messages[0].subject}}
+        ---
+        {{messages[0].snippet}}
+      deliver: true
+      channel: "telegram"
+      to: "7121639624" # Jing 的 TG ID
