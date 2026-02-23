@@ -5,40 +5,42 @@
 import type { MmConfig } from "./types.js";
 
 export const DEFAULT_CONFIG: MmConfig = {
-  // Capital ($228 post-redemption)
-  totalCapital: 228,
-  maxCapitalPerMarket: 100, // single market higher budget
-  reserveRatio: 0.1, // keep 10% capital unused
+  // Capital — single-market strategy with $237 balance
+  // Most high-reward markets need minSize=200 (≈$200 capital).
+  // We concentrate capital in 1 market for maximum scoring.
+  totalCapital: 237,
+  maxCapitalPerMarket: 220, // must cover minSize=200 × ~$1 (yes+no prices)
+  reserveRatio: 0.08, // keep 8% capital unused ($19 buffer)
 
   // Quoting — dynamic spread ratios (fraction of market's maxSpread)
-  defaultSpreadRatio: 0.35, // default 35% of maxSpread
+  defaultSpreadRatio: 0.35, // default 35% of maxSpread → highest S(v,s) score
   minSpreadRatio: 0.2, // floor 20%
   maxSpreadRatio: 0.8, // ceiling 80%
   // Legacy fixed spread fields (fallback when market maxSpread unavailable)
   defaultSpread: 0.01,
   minSpread: 0.01,
   maxSpread: 0.05,
-  orderSize: 40, // $40 base, auto-adapted to meet minSize
-  numLevels: 1, // single level concentrate capital
+  orderSize: 100, // $100 base — adaptive sizing bumps to meet minSize
+  numLevels: 1, // single level concentrate capital for max score
   refreshIntervalMs: 10_000, // 10s faster refresh
 
   // Inventory management
-  maxInventoryPerMarket: 80, // match higher single-market budget
+  maxInventoryPerMarket: 200, // allow up to 200 shares (match minSize=200 markets)
   skewFactor: 0.5,
 
   // Risk
-  maxTotalExposure: 150, // ~66% of capital
-  maxDrawdownPercent: 12, // tighter stop
-  maxDailyLoss: 10, // tighter daily loss cap
+  maxTotalExposure: 200, // ~85% of capital (one market can use most of it)
+  maxDrawdownPercent: 15, // allow more room for market-making variance
+  maxDailyLoss: 15, // aligned with drawdown limit
 
   // Opportunistic trading
   deviationThreshold: 0.15,
   opportunisticSize: 15,
 
   // Markets
-  maxConcurrentMarkets: 2, // only 2 markets with this capital
+  maxConcurrentMarkets: 1, // concentrate capital in 1 market for max score
   minDailyVolume: 200, // lowered
-  minRewardRate: 0.5, // at least $0.50/day
+  minRewardRate: 10, // at least $10/day (skip dust markets)
 
   // Fill recovery
   fillRecoveryTimeoutMs: 300_000, // 5 minutes before force sell

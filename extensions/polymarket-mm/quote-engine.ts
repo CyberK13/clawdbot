@@ -129,7 +129,10 @@ export class QuoteEngine {
     // Adaptive order sizing: ensure shares >= minScoringSize for reward eligibility.
     // If fixed orderSize doesn't produce enough shares, auto-scale up.
     const minScoringSize = market.rewardsMinSize;
-    const maxOrderUsdc = this.config.maxCapitalPerMarket * 0.5; // single-side cap
+    // Per-token cap: use requiredCapital from scanner (accounts for both tokens)
+    // or fallback to maxCapitalPerMarket. Allow up to 90% of per-market budget
+    // for a single token since complement token is much cheaper at extremes.
+    const maxOrderUsdc = this.config.maxCapitalPerMarket * 0.9;
 
     // Check available inventory for SELL orders
     const pos = this.state.getPosition(tokenId);
