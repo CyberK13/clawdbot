@@ -18,6 +18,12 @@
 //    - Cancel all orders
 //    - FOK sell all positions
 //    - Wait for capital recovery, restart with defensive spread
+//
+// Safety features (v2):
+//   - pendingSells persisted to state (survives restart)
+//   - Min price protection (won't sell below avgEntry * minSellPriceRatio)
+//   - Retry with exponential backoff + split progression (100% → 50% → 25%)
+//   - Liquidity check before FOK to avoid rejection on thin books
 // ---------------------------------------------------------------------------
 
 import { OrderType, Side } from "@polymarket/clob-client";
@@ -25,19 +31,10 @@ import type { PluginLogger } from "../../src/plugins/types.js";
 import type { PolymarketClient } from "./client.js";
 import type { SpreadController } from "./spread-controller.js";
 import type { StateManager } from "./state.js";
-import type { MmConfig, MmMarket, TrackedOrder, FillEvent } from "./types.js";
-
-interface PendingSell {
-  tokenId: string;
-  conditionId: string;
-  shares: number;
-  placedAt: number;
-  sellOrderId?: string; // limit SELL order ID if placed
-}
+import type { MmConfig, MmMarket, TrackedOrder, FillEvent, PendingSell } from "./types.js";
 
 export class FillHandler {
   private logger: PluginLogger;
-  private pendingSells: Map<string, PendingSell> = new Map(); // key = tokenId
   /** Condition IDs of currently active markets (set by engine). */
   private activeMarketIds: Set<string> = new Set();
 
@@ -54,6 +51,54 @@ export class FillHandler {
   /** Update the set of active market condition IDs (called by engine on scan). */
   setActiveMarkets(conditionIds: string[]): void {
     this.activeMarketIds = new Set(conditionIds);
+  }
+
+  /**
+   * Restore pending sells from persisted state on startup.
+   * Validates each against current position, cleans stale entries.
+   */
+  async restorePendingSells(): Promise<void> {
+    const pending = this.state.getPendingSells();
+    const keys = Object.keys(pending);
+    if (keys.length === 0) return;
+
+    this.logger.info(`Restoring ${keys.length} pending sells from state...`);
+
+    for (const tokenId of keys) {
+      const ps = pending[tokenId];
+      const pos = this.state.getPosition(tokenId);
+
+      if (!pos || pos.netShares <= 0) {
+        // Position no longer exists — clean up
+        this.logger.info(
+          `Pending sell for ${tokenId.slice(0, 10)} no longer has position, removing`,
+        );
+        this.state.removePendingSell(tokenId);
+        continue;
+      }
+
+      // Update shares to match actual position (may have changed)
+      if (pos.netShares < ps.shares) {
+        this.logger.info(
+          `Pending sell ${tokenId.slice(0, 10)}: adjusting shares ${ps.shares.toFixed(1)} → ${pos.netShares.toFixed(1)}`,
+        );
+        ps.shares = pos.netShares;
+        this.state.setPendingSell(tokenId, ps);
+      }
+
+      // Clear stale sellOrderId — the limit order is gone after restart
+      if (ps.sellOrderId) {
+        ps.sellOrderId = undefined;
+        this.state.setPendingSell(tokenId, ps);
+      }
+
+      this.logger.info(
+        `Restored pending sell: ${tokenId.slice(0, 10)} ${ps.shares.toFixed(1)} shares ` +
+          `(retries=${ps.retryCount}, split=${ps.splitFactor})`,
+      );
+    }
+
+    this.state.forceSave();
   }
 
   /**
@@ -97,40 +142,105 @@ export class FillHandler {
   }
 
   /**
-   * Check for timed-out pending sells and force-liquidate.
+   * Check for timed-out pending sells and force-liquidate with retry/split logic.
    * Called every ~60 seconds from engine.
    */
   async checkTimeouts(): Promise<void> {
     const now = Date.now();
+    const pending = this.state.getPendingSells();
 
-    for (const [tokenId, pending] of this.pendingSells) {
-      if (now - pending.placedAt < this.config.fillRecoveryTimeoutMs) continue;
+    for (const [tokenId, ps] of Object.entries(pending)) {
+      // Check if enough time has passed since last attempt
+      const delaySinceLastAttempt = now - ps.lastAttemptAt;
+      const requiredDelay =
+        ps.retryCount === 0
+          ? this.config.fillRecoveryTimeoutMs
+          : this.config.forceSellRetryDelayMs * Math.min(ps.retryCount, 5); // exponential cap at 5x
 
-      this.logger.info(
-        `Fill recovery timeout: ${tokenId.slice(0, 10)} — force selling ${pending.shares.toFixed(1)} shares`,
-      );
+      if (delaySinceLastAttempt < requiredDelay) continue;
 
-      // Cancel the limit SELL if it exists
-      if (pending.sellOrderId) {
-        try {
-          await this.client.cancelOrder(pending.sellOrderId);
-          this.state.removeOrder(pending.sellOrderId);
-        } catch {
-          // may already be filled or cancelled
-        }
-      }
-
-      // Check current balance before attempting sell
+      // Check current position
       const pos = this.state.getPosition(tokenId);
       if (!pos || pos.netShares <= 0) {
-        this.pendingSells.delete(tokenId);
+        this.logger.info(`Pending sell ${tokenId.slice(0, 10)}: position gone, cleaning up`);
+        this.state.removePendingSell(tokenId);
         continue;
       }
 
-      // FOK market sell remaining shares
-      await this.forceSell(tokenId, pending.conditionId, pos.netShares);
-      this.pendingSells.delete(tokenId);
+      // Cancel the limit SELL if it exists
+      if (ps.sellOrderId) {
+        try {
+          await this.client.cancelOrder(ps.sellOrderId);
+          this.state.removeOrder(ps.sellOrderId);
+        } catch {
+          // may already be filled or cancelled
+        }
+        ps.sellOrderId = undefined;
+      }
+
+      // Calculate shares to sell based on split factor
+      const sharesToSell = Math.min(pos.netShares * ps.splitFactor, pos.netShares);
+      if (sharesToSell <= 0) {
+        this.state.removePendingSell(tokenId);
+        continue;
+      }
+
+      this.logger.info(
+        `Force sell attempt: ${tokenId.slice(0, 10)} ${sharesToSell.toFixed(1)} shares ` +
+          `(retry=${ps.retryCount}, split=${ps.splitFactor})`,
+      );
+
+      const success = await this.forceSell(tokenId, ps.conditionId, sharesToSell);
+
+      if (success) {
+        // Check if full position is now gone
+        const posAfter = this.state.getPosition(tokenId);
+        if (!posAfter || posAfter.netShares <= 0) {
+          this.state.removePendingSell(tokenId);
+        } else {
+          // Update pending sell for remaining shares
+          ps.shares = posAfter.netShares;
+          ps.retryCount = 0;
+          ps.lastAttemptAt = now;
+          this.state.setPendingSell(tokenId, ps);
+        }
+      } else {
+        // Failed — advance retry/split progression
+        ps.retryCount++;
+        ps.lastAttemptAt = now;
+
+        if (ps.retryCount >= this.config.forceSellMaxRetries) {
+          // Reduce split factor and reset retries
+          if (ps.splitFactor > 0.25) {
+            const newSplit = ps.splitFactor * 0.5;
+            this.logger.warn(
+              `Force sell exhausted retries at split=${ps.splitFactor}, reducing to ${newSplit.toFixed(2)}`,
+            );
+            ps.splitFactor = newSplit;
+            ps.retryCount = 0;
+          } else {
+            // At minimum split — reset with long delay (don't fully give up)
+            this.logger.warn(
+              `Force sell exhausted all split levels for ${tokenId.slice(0, 10)}, resetting with long delay`,
+            );
+            ps.splitFactor = 1.0;
+            ps.retryCount = 0;
+            // Set lastAttemptAt far enough that next retry is delayed by 5 min
+            ps.lastAttemptAt = now + 300_000 - this.config.forceSellRetryDelayMs;
+          }
+        }
+
+        this.state.setPendingSell(tokenId, ps);
+      }
     }
+  }
+
+  /**
+   * Public forceSell wrapper for engine liquidation / orphan selling.
+   * Returns true if the sell succeeded.
+   */
+  async forceSellPublic(tokenId: string, conditionId: string, shares: number): Promise<boolean> {
+    return this.forceSell(tokenId, conditionId, shares);
   }
 
   // ---- Internal -----------------------------------------------------------
@@ -160,12 +270,16 @@ export class FillHandler {
       `Low exposure fill recovery: ${order.tokenId.slice(0, 10)} ${fillSize.toFixed(1)} shares`,
     );
 
-    // Track pending sell with timeout
-    this.pendingSells.set(order.tokenId, {
+    // Track pending sell with timeout — persisted to state
+    const now = Date.now();
+    this.state.setPendingSell(order.tokenId, {
       tokenId: order.tokenId,
       conditionId: order.conditionId,
       shares: fillSize,
-      placedAt: Date.now(),
+      placedAt: now,
+      retryCount: 0,
+      lastAttemptAt: now,
+      splitFactor: 1.0,
     });
 
     // Place a SELL limit at midpoint + spread for extra scoring
@@ -204,8 +318,11 @@ export class FillHandler {
 
       const sellId = result?.orderID || result?.orderHashes?.[0];
       if (sellId) {
-        const pending = this.pendingSells.get(order.tokenId);
-        if (pending) pending.sellOrderId = sellId;
+        const ps = this.state.getPendingSells()[order.tokenId];
+        if (ps) {
+          ps.sellOrderId = sellId;
+          this.state.setPendingSell(order.tokenId, ps);
+        }
 
         this.state.trackOrder({
           orderId: sellId,
@@ -246,7 +363,20 @@ export class FillHandler {
     const available = pos ? Math.max(0, pos.netShares) : 0;
     const sellShares = Math.min(fillSize * 0.5, available);
     if (sellShares > 0) {
-      await this.forceSell(order.tokenId, order.conditionId, sellShares);
+      const success = await this.forceSell(order.tokenId, order.conditionId, sellShares);
+      if (!success) {
+        // Track as pending sell for retry
+        const now = Date.now();
+        this.state.setPendingSell(order.tokenId, {
+          tokenId: order.tokenId,
+          conditionId: order.conditionId,
+          shares: available,
+          placedAt: now,
+          retryCount: 0,
+          lastAttemptAt: now,
+          splitFactor: 1.0,
+        });
+      }
     } else {
       this.logger.warn(`No shares available to sell for ${order.tokenId.slice(0, 10)}`);
     }
@@ -261,33 +391,81 @@ export class FillHandler {
     for (const token of market.tokens) {
       const pos = this.state.getPosition(token.tokenId);
       if (pos && pos.netShares > 0) {
-        await this.forceSell(token.tokenId, market.conditionId, pos.netShares);
+        const success = await this.forceSell(token.tokenId, market.conditionId, pos.netShares);
+        if (!success) {
+          // Track as pending sell for retry
+          const now = Date.now();
+          this.state.setPendingSell(token.tokenId, {
+            tokenId: token.tokenId,
+            conditionId: market.conditionId,
+            shares: pos.netShares,
+            placedAt: now,
+            retryCount: 0,
+            lastAttemptAt: now,
+            splitFactor: 1.0,
+          });
+        }
       }
     }
   }
 
   /**
-   * FOK market sell — accepts best available price.
+   * FOK market sell with min price protection and liquidity check.
+   * Returns true if the sell succeeded.
    */
-  private async forceSell(tokenId: string, conditionId: string, shares: number): Promise<void> {
-    if (shares <= 0) return;
+  private async forceSell(tokenId: string, conditionId: string, shares: number): Promise<boolean> {
+    if (shares <= 0) return true;
 
     try {
-      // Get current best bid to set a reasonable floor price
+      // Get current orderbook for bid liquidity check
       const book = await this.client.getOrderBook(tokenId);
       const bids = book.bids || [];
-      const bestBid = bids.length > 0 ? parseFloat(bids[0].price) : 0.01;
+      const bestBid = bids.length > 0 ? parseFloat(bids[0].price) : 0;
+
+      if (bestBid <= 0 || bids.length === 0) {
+        this.logger.warn(`Force sell ${tokenId.slice(0, 10)}: no bids available`);
+        return false;
+      }
+
+      // Min price protection: don't sell below avgEntry * minSellPriceRatio
+      const pos = this.state.getPosition(tokenId);
+      const avgEntry = pos?.avgEntry ?? 0;
+      const minPrice = avgEntry * this.config.minSellPriceRatio;
+      if (bestBid < minPrice && minPrice > 0.01) {
+        this.logger.warn(
+          `Force sell ${tokenId.slice(0, 10)}: bestBid ${bestBid.toFixed(3)} below min price ` +
+            `${minPrice.toFixed(3)} (entry=${avgEntry.toFixed(3)} × ratio=${this.config.minSellPriceRatio})`,
+        );
+        return false;
+      }
+
+      // Check available bid liquidity (sum of bid sizes up to our sell amount)
+      let availableLiquidity = 0;
+      for (const bid of bids) {
+        availableLiquidity += parseFloat(bid.size);
+        if (availableLiquidity >= shares) break;
+      }
+
+      // Sell only what liquidity allows (with 5% safety margin)
+      const maxSellable = availableLiquidity * 0.95;
+      const actualShares = Math.min(shares, maxSellable);
+      if (actualShares < 1) {
+        this.logger.warn(
+          `Force sell ${tokenId.slice(0, 10)}: insufficient liquidity (${availableLiquidity.toFixed(1)} available, need ${shares.toFixed(1)})`,
+        );
+        return false;
+      }
 
       // Use FOK at slightly below best bid to ensure fill
       const sellPrice = Math.max(0.01, bestBid - 0.01);
       const tickSize = (book.tick_size || "0.01") as import("@polymarket/clob-client").TickSize;
       const negRisk = book.neg_risk || false;
 
-      const result = await this.client.createAndPostOrder(
+      await this.client.createAndPostOrder(
         {
           tokenID: tokenId,
           price: sellPrice,
-          size: shares,
+          size: actualShares,
           side: Side.SELL,
           feeRateBps: 0,
         },
@@ -297,16 +475,25 @@ export class FillHandler {
       );
 
       this.logger.info(
-        `Force SELL: ${shares.toFixed(1)} shares of ${tokenId.slice(0, 10)} @ ${sellPrice} (FOK)`,
+        `Force SELL: ${actualShares.toFixed(1)} shares of ${tokenId.slice(0, 10)} @ ${sellPrice} (FOK)`,
       );
 
       // Update position tracking
-      const pos = this.state.getPosition(tokenId);
       if (pos) {
-        this.state.updatePosition(tokenId, conditionId, pos.outcome, shares, sellPrice, "SELL");
+        this.state.updatePosition(
+          tokenId,
+          conditionId,
+          pos.outcome,
+          actualShares,
+          sellPrice,
+          "SELL",
+        );
       }
+
+      return true;
     } catch (err: any) {
       this.logger.error(`Force sell failed for ${tokenId.slice(0, 10)}: ${err.message}`);
+      return false;
     }
   }
 }

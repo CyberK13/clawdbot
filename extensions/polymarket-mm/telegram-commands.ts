@@ -40,6 +40,8 @@ export function createMmCommandHandler(engine: MmEngine) {
         return handleResume(engine, args[1]);
       case "scan":
         return handleScan(engine);
+      case "liquidate":
+        return handleLiquidate(engine);
       case "redeem":
         return handleRedeem(engine, args[1]);
       case "portfolio":
@@ -73,8 +75,12 @@ async function handleStop(engine: MmEngine): Promise<PluginCommandResult> {
 }
 
 async function handleKill(engine: MmEngine): Promise<PluginCommandResult> {
-  await engine.emergencyKill("Telegram /mm kill");
-  return { text: "🚨 紧急停止！所有订单已取消。" };
+  const result = await engine.emergencyKill("Telegram /mm kill");
+  let text = "🚨 紧急停止！所有订单已取消。";
+  if (result.liquidated) {
+    text += "\n💰 已尝试清仓所有持仓。";
+  }
+  return { text };
 }
 
 function handleStatus(engine: MmEngine): PluginCommandResult {
@@ -213,6 +219,24 @@ function handleFills(engine: MmEngine, countStr?: string): PluginCommandResult {
   return { text };
 }
 
+async function handleLiquidate(engine: MmEngine): Promise<PluginCommandResult> {
+  if (engine.isRunning()) {
+    return { text: "⚠️ 请先停止 MM (/mm stop)，再执行清仓" };
+  }
+
+  try {
+    const result = await engine.liquidateAllPositions();
+    let text = `💰 清仓完成:\n`;
+    text += `  ✅ 成功: ${result.success}\n`;
+    if (result.failed > 0) {
+      text += `  ❌ 失败: ${result.failed}（将通过 pending sells 自动重试）\n`;
+    }
+    return { text };
+  } catch (err: any) {
+    return { text: `❌ 清仓失败: ${err.message}` };
+  }
+}
+
 async function handlePause(engine: MmEngine, conditionId?: string): Promise<PluginCommandResult> {
   if (!conditionId) {
     return { text: "用法: /mm pause <condition_id 或市场编号>" };
@@ -312,7 +336,8 @@ function handleHelp(): PluginCommandResult {
       "📖 Polymarket MM 命令:",
       "  /mm start       - 启动做市",
       "  /mm stop        - 停止做市（取消订单）",
-      "  /mm kill        - 紧急停止",
+      "  /mm kill        - 紧急停止（自动清仓）",
+      "  /mm liquidate   - 强制清仓所有持仓",
       "  /mm status      - 查看状态",
       "  /mm portfolio   - 查看资产组合明细",
       "  /mm markets     - 查看活跃市场",

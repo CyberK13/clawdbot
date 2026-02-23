@@ -7,7 +7,14 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { PluginLogger } from "../../src/plugins/types.js";
-import type { MmState, TrackedOrder, Position, FillEvent, SpreadState } from "./types.js";
+import type {
+  MmState,
+  TrackedOrder,
+  Position,
+  FillEvent,
+  SpreadState,
+  PendingSell,
+} from "./types.js";
 import { todayUTC } from "./utils.js";
 
 const STATE_FILE = "polymarket-mm.json";
@@ -23,6 +30,7 @@ function defaultState(): MmState {
     totalRewardsEstimate: 0,
     positions: {},
     trackedOrders: {},
+    pendingSells: {},
     activeMarkets: [],
     pausedMarkets: [],
     errorCount: 0,
@@ -221,6 +229,24 @@ export class StateManager {
       total += Math.abs(pos.netShares) * price;
     }
     return total;
+  }
+
+  // ---- Pending sells (persisted for crash recovery) -----------------------
+
+  setPendingSell(tokenId: string, pending: PendingSell): void {
+    if (!this.state.pendingSells) this.state.pendingSells = {};
+    this.state.pendingSells[tokenId] = pending;
+    this.dirty = true;
+  }
+
+  removePendingSell(tokenId: string): void {
+    if (!this.state.pendingSells) return;
+    delete this.state.pendingSells[tokenId];
+    this.dirty = true;
+  }
+
+  getPendingSells(): Record<string, PendingSell> {
+    return this.state.pendingSells || {};
   }
 
   // ---- Order tracking ------------------------------------------------------

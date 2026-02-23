@@ -132,15 +132,31 @@ export class OrderManager {
 
   /**
    * Detect fills by comparing tracked orders with exchange state.
-   * Returns list of fills detected.
+   * When orders disappear, verify via getTrades() to distinguish real fills
+   * from external cancellations (prevents phantom position tracking).
    */
   async detectFills(): Promise<Array<{ order: TrackedOrder; fillSize: number }>> {
     const fills: Array<{ order: TrackedOrder; fillSize: number }> = [];
 
     try {
       const openOrders = await this.client.getOpenOrders();
-      const openIds = new Set(openOrders.map((o) => o.id));
       const trackedOrders = this.state.getTrackedOrders();
+
+      // Fetch recent trades for fill verification (only if we have disappeared orders)
+      const disappearedOrders = trackedOrders.filter(
+        (t) => t.status === "live" && !openOrders.find((o) => o.id === t.orderId),
+      );
+      let recentTrades: import("@polymarket/clob-client").Trade[] | null = null;
+      if (disappearedOrders.length > 0) {
+        try {
+          recentTrades = await this.client.getTrades();
+        } catch {
+          // If getTrades() fails, fall back to assume-fill behavior for safety
+          this.logger.warn(
+            "getTrades() failed, falling back to assume-fill for disappeared orders",
+          );
+        }
+      }
 
       for (const tracked of trackedOrders) {
         if (tracked.status !== "live") continue;
@@ -148,15 +164,45 @@ export class OrderManager {
         const onExchange = openOrders.find((o) => o.id === tracked.orderId);
 
         if (!onExchange) {
-          // Order disappeared → fully filled or cancelled externally
+          // Order disappeared — verify with trades
           const fillSize = tracked.originalSize - tracked.filledSize;
-          if (fillSize > 0) {
+
+          if (fillSize > 0 && recentTrades !== null) {
+            // Look for matching trade
+            const matchingTrade = recentTrades.find(
+              (t) =>
+                t.order_id === tracked.orderId ||
+                (t.asset_id === tracked.tokenId &&
+                  t.side === tracked.side &&
+                  Math.abs(parseFloat(t.price) - tracked.price) < 0.01 &&
+                  Math.abs(parseFloat(t.size) - fillSize) < 1),
+            );
+
+            if (matchingTrade) {
+              // Confirmed fill
+              const confirmedSize = parseFloat(matchingTrade.size) || fillSize;
+              fills.push({ order: tracked, fillSize: confirmedSize });
+              tracked.status = "filled";
+              tracked.filledSize = tracked.originalSize;
+              this.logger.info(
+                `Verified fill via trade: ${tracked.side} ${confirmedSize.toFixed(1)} @ ${tracked.price.toFixed(3)}`,
+              );
+            } else {
+              // No matching trade — external cancel, not a fill
+              this.logger.info(
+                `Order ${tracked.orderId.slice(0, 10)} disappeared with no matching trade — treating as external cancel`,
+              );
+              tracked.status = "cancelled";
+            }
+          } else if (fillSize > 0) {
+            // getTrades() failed — assume fill for safety (old behavior)
             fills.push({ order: tracked, fillSize });
             tracked.status = "filled";
             tracked.filledSize = tracked.originalSize;
           } else {
             tracked.status = "cancelled";
           }
+
           this.state.trackOrder(tracked); // update status
         } else {
           // Check for partial fills

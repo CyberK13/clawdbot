@@ -136,4 +136,57 @@ export class InventoryManager {
       this.logger.warn(`Reconciliation failed: ${err.message}`);
     }
   }
+
+  /**
+   * Reconcile tracked positions against on-chain balances.
+   * Corrects significant discrepancies (>1% or >0.5 shares),
+   * trusting on-chain as source of truth while preserving cost basis.
+   */
+  async reconcilePositions(activeMarkets: MmMarket[]): Promise<void> {
+    const st = this.state.get();
+    let corrected = 0;
+
+    for (const market of activeMarkets) {
+      for (const token of market.tokens) {
+        const pos = st.positions[token.tokenId];
+        if (!pos) continue;
+
+        // Skip zero positions
+        if (pos.netShares === 0) continue;
+
+        // Get on-chain balance via CLOB API (NegRisk compatible)
+        const onChainBalance = await this.client.getConditionalBalance(token.tokenId);
+        if (onChainBalance < 0) continue; // API failure, skip
+
+        // Account for shares locked in open sell orders
+        const openSellShares = this.state
+          .getMarketOrders(market.conditionId)
+          .filter((o) => o.tokenId === token.tokenId && o.side === "SELL" && o.status === "live")
+          .reduce((sum, o) => sum + (o.originalSize - o.filledSize), 0);
+
+        const expectedOnChain = Math.max(0, pos.netShares - openSellShares);
+        const discrepancy = Math.abs(onChainBalance - expectedOnChain);
+
+        // Only correct significant discrepancies (>1% or >0.5 shares)
+        const pctDiscrepancy = expectedOnChain > 0 ? discrepancy / expectedOnChain : 0;
+        if (discrepancy <= 0.5 && pctDiscrepancy <= 0.01) continue;
+
+        const actualShares = onChainBalance + openSellShares;
+        this.logger.warn(
+          `Position reconciliation: ${token.outcome} tracked=${pos.netShares.toFixed(1)} ` +
+            `on-chain=${onChainBalance.toFixed(1)} openSells=${openSellShares.toFixed(1)} → ` +
+            `corrected to ${actualShares.toFixed(1)}`,
+        );
+
+        // Trust on-chain, preserve avgEntry cost basis
+        pos.netShares = actualShares;
+        corrected++;
+      }
+    }
+
+    if (corrected > 0) {
+      this.state.update({}); // mark dirty
+      this.logger.info(`Position reconciliation: corrected ${corrected} positions`);
+    }
+  }
 }

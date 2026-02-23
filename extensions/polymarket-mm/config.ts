@@ -5,50 +5,57 @@
 import type { MmConfig } from "./types.js";
 
 export const DEFAULT_CONFIG: MmConfig = {
-  // Capital — single-market strategy with $237 balance
-  // Most high-reward markets need minSize=200 (≈$200 capital).
-  // We concentrate capital in 1 market for maximum scoring.
-  totalCapital: 237,
-  maxCapitalPerMarket: 220, // must cover minSize=200 × ~$1 (yes+no prices)
-  reserveRatio: 0.08, // keep 8% capital unused ($19 buffer)
+  // Capital — aggressive single-market strategy, full capital deployment
+  // $238 balance → deploy nearly all into highest-reward market
+  totalCapital: 238,
+  maxCapitalPerMarket: 235, // near-full deployment
+  reserveRatio: 0.02, // minimal 2% reserve ($~5 buffer)
 
   // Quoting — dynamic spread ratios (fraction of market's maxSpread)
   defaultSpreadRatio: 0.35, // default 35% of maxSpread → highest S(v,s) score
-  minSpreadRatio: 0.2, // floor 20%
-  maxSpreadRatio: 0.8, // ceiling 80%
+  minSpreadRatio: 0.15, // floor 15% — allow tighter spreads for better scoring
+  maxSpreadRatio: 0.85, // ceiling 85% — allow wider spread when needed
   // Legacy fixed spread fields (fallback when market maxSpread unavailable)
   defaultSpread: 0.01,
   minSpread: 0.01,
   maxSpread: 0.05,
-  orderSize: 100, // $100 base — adaptive sizing bumps to meet minSize
+  orderSize: 115, // ~half of capital: YES + NO each get ~$115 ≈ $230 total
   numLevels: 1, // single level concentrate capital for max score
   refreshIntervalMs: 10_000, // 10s faster refresh
 
   // Inventory management
-  maxInventoryPerMarket: 200, // allow up to 200 shares (match minSize=200 markets)
+  maxInventoryPerMarket: 300, // allow larger positions
   skewFactor: 0.5,
 
-  // Risk
-  maxTotalExposure: 200, // ~85% of capital (one market can use most of it)
-  maxDrawdownPercent: 15, // allow more room for market-making variance
-  maxDailyLoss: 15, // aligned with drawdown limit
+  // Risk — relaxed for full-capital deployment
+  maxTotalExposure: 230, // ~97% of capital
+  maxDrawdownPercent: 30, // generous room for MM variance
+  maxDailyLoss: 30, // aligned with drawdown
 
   // Opportunistic trading
   deviationThreshold: 0.15,
-  opportunisticSize: 15,
+  opportunisticSize: 20,
 
   // Markets
   maxConcurrentMarkets: 1, // concentrate capital in 1 market for max score
-  minDailyVolume: 200, // lowered
-  minRewardRate: 10, // at least $10/day (skip dust markets)
+  minDailyVolume: 100, // lower threshold to not miss markets
+  minRewardRate: 50, // target $50+/day markets (worth the capital)
 
   // Fill recovery
   fillRecoveryTimeoutMs: 300_000, // 5 minutes before force sell
-  maxExposureForSoftSell: 0.3, // <30% capital → soft recovery
-  maxExposureForHardSell: 0.5, // >50% capital → force liquidate
+  maxExposureForSoftSell: 0.4, // <40% capital → soft recovery (limit sell)
+  maxExposureForHardSell: 0.7, // >70% capital → force liquidate
+  // More tolerant: let positions ride longer before panic-selling
 
   // Reconciliation
   reconcileIntervalMs: 300_000, // every 5 minutes
+
+  // Exit / liquidation safety
+  minSellPriceRatio: 0.5, // won't force sell below 50% of entry price
+  forceSellMaxRetries: 5, // retries per split level
+  forceSellRetryDelayMs: 30_000, // 30s between retries
+  liquidateOnStop: false, // don't liquidate on graceful stop by default
+  liquidateOnKill: true, // attempt liquidation on kill
 };
 
 /** Merge user overrides onto defaults, validating ranges. */
@@ -79,6 +86,9 @@ export function resolveConfig(overrides?: Partial<MmConfig>): MmConfig {
   cfg.maxExposureForSoftSell = clamp(cfg.maxExposureForSoftSell, 0.1, 0.5);
   cfg.maxExposureForHardSell = clamp(cfg.maxExposureForHardSell, cfg.maxExposureForSoftSell, 0.9);
   cfg.reconcileIntervalMs = Math.max(60_000, cfg.reconcileIntervalMs);
+  cfg.minSellPriceRatio = clamp(cfg.minSellPriceRatio, 0.1, 0.95);
+  cfg.forceSellMaxRetries = clamp(cfg.forceSellMaxRetries, 1, 20);
+  cfg.forceSellRetryDelayMs = Math.max(5_000, cfg.forceSellRetryDelayMs);
 
   return cfg;
 }

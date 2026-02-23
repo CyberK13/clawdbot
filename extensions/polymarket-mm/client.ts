@@ -5,6 +5,7 @@
 // - Rate limiting with exponential backoff
 // ---------------------------------------------------------------------------
 
+import { createRequire } from "node:module";
 import type {
   OrderBookSummary,
   OpenOrder,
@@ -20,7 +21,6 @@ import type {
 } from "@polymarket/clob-client";
 import { ClobClient, Chain } from "@polymarket/clob-client";
 import { OrderType, Side } from "@polymarket/clob-client";
-import { createRequire } from "node:module";
 // SignedOrder type from clob-client's internal dependency
 type SignedOrder = any;
 import type { PluginLogger } from "../../src/plugins/types.js";
@@ -231,6 +231,26 @@ export class PolymarketClient {
   async getMarket(conditionId: string): Promise<any> {
     await this.rateLimit();
     return this.wrap(() => this.client.getMarket(conditionId));
+  }
+
+  /**
+   * Get conditional token balance via CLOB API (works for NegRisk markets).
+   * Uses getBalanceAllowance with asset_type CONDITIONAL.
+   */
+  async getConditionalBalance(tokenId: string): Promise<number> {
+    await this.rateLimit();
+    try {
+      const res = await this.wrap(() =>
+        this.client.getBalanceAllowance({
+          asset_type: "CONDITIONAL" as any,
+          token_id: tokenId,
+        } as any),
+      );
+      return parseFloat(res.balance) / 1e6;
+    } catch (err: any) {
+      this.logger.warn(`getConditionalBalance failed for ${tokenId.slice(0, 10)}: ${err.message}`);
+      return -1; // signal failure
+    }
   }
 
   // ---------- On-chain (CTF contract) ----------------------------------------

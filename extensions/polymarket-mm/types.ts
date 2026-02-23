@@ -56,6 +56,18 @@ export interface MmConfig {
 
   // Reconciliation
   reconcileIntervalMs: number;
+
+  // Exit / liquidation safety
+  /** Min sell price as fraction of avgEntry (e.g. 0.5 = won't sell below 50% of entry) */
+  minSellPriceRatio: number;
+  /** Max retries per split level before reducing split factor */
+  forceSellMaxRetries: number;
+  /** Delay between force sell retries (ms) */
+  forceSellRetryDelayMs: number;
+  /** Whether to liquidate positions on graceful stop */
+  liquidateOnStop: boolean;
+  /** Whether to liquidate positions on emergency kill */
+  liquidateOnKill: boolean;
 }
 
 // ---- Market ----------------------------------------------------------------
@@ -159,6 +171,7 @@ export interface MmState {
   totalRewardsEstimate: number;
   positions: Record<string, Position>; // key = tokenId
   trackedOrders: Record<string, TrackedOrder>; // key = orderId
+  pendingSells: Record<string, PendingSell>; // key = tokenId
   activeMarkets: string[]; // conditionIds
   pausedMarkets: string[];
   errorCount: number;
@@ -229,6 +242,20 @@ export interface FillEvent {
   price: number;
   size: number;
   timestamp: number;
+}
+
+// ---- Pending Sell (persisted for crash recovery) ----------------------------
+
+export interface PendingSell {
+  tokenId: string;
+  conditionId: string;
+  shares: number;
+  placedAt: number;
+  sellOrderId?: string; // limit SELL order ID if placed
+  retryCount: number;
+  lastAttemptAt: number;
+  /** Split progression: 1.0 → 0.5 → 0.25 of original shares */
+  splitFactor: number;
 }
 
 // ---- Events ----------------------------------------------------------------

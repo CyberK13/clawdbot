@@ -121,6 +121,13 @@ export class MmEngine {
       this.logger.info(`Pruned ${pruned} stale positions from resolved markets`);
     }
     this.fillHandler.setActiveMarkets(activeIds);
+
+    // Restore pending sells from persisted state (crash recovery)
+    await this.fillHandler.restorePendingSells();
+
+    // Detect orphan positions (in non-active markets) and queue for sell
+    await this.sellOrphanPositions(activeIds);
+
     this.stateMgr.update({
       running: true,
       startedAt: Date.now(),
@@ -142,7 +149,7 @@ export class MmEngine {
     this.scheduleLoop();
   }
 
-  async stop(reason: string): Promise<void> {
+  async stop(reason: string, liquidate?: boolean): Promise<void> {
     if (!this.running) return;
     this.running = false;
     if (this.loopHandle) {
@@ -155,13 +162,20 @@ export class MmEngine {
     // Cancel all orders
     await this.orderMgr.cancelAllOrders();
 
+    // Optionally liquidate positions
+    const shouldLiquidate = liquidate ?? this.config.liquidateOnStop;
+    if (shouldLiquidate) {
+      this.logger.info("Liquidating positions on stop...");
+      await this.liquidateAllPositions();
+    }
+
     this.stateMgr.update({ running: false });
     this.stateMgr.stopAutoSave();
     this.logger.info("MM stopped. All orders cancelled. State saved.");
     // Note: dashboard keeps running so user can still see status after stop
   }
 
-  async emergencyKill(reason: string): Promise<void> {
+  async emergencyKill(reason: string): Promise<{ liquidated: boolean }> {
     this.running = false;
     if (this.loopHandle) {
       clearTimeout(this.loopHandle);
@@ -177,6 +191,18 @@ export class MmEngine {
       // Best effort
     }
 
+    // Attempt to liquidate positions if configured
+    let liquidated = false;
+    if (this.config.liquidateOnKill) {
+      this.logger.info("Attempting liquidation on kill...");
+      try {
+        await this.liquidateAllPositions();
+        liquidated = true;
+      } catch (err: any) {
+        this.logger.error(`Liquidation on kill failed: ${err.message}`);
+      }
+    }
+
     this.stateMgr.update({
       running: false,
       killSwitchTriggered: true,
@@ -184,6 +210,7 @@ export class MmEngine {
     });
     this.stateMgr.forceSave();
     this.stateMgr.stopAutoSave();
+    return { liquidated };
   }
 
   isRunning(): boolean {
@@ -279,6 +306,15 @@ export class MmEngine {
       // --- Every 360 ticks (30 min): market rescan ---
       if (this.tickCount % 360 === 0 || this.scanner.shouldRescan()) {
         await this.rescanMarketsInternal();
+      }
+
+      // --- Every 60 ticks (5 min): position reconciliation ---
+      if (this.tickCount % 60 === 0) {
+        try {
+          await this.inventory.reconcilePositions(this.activeMarkets);
+        } catch (err: any) {
+          this.logger.warn(`Position reconciliation failed: ${err.message}`);
+        }
       }
 
       // --- Once per hour: fetch actual earnings ---
@@ -430,6 +466,17 @@ export class MmEngine {
 
     for (const id of removedIds) {
       await this.orderMgr.cancelMarketOrders(id);
+
+      // Sell positions in removed markets to prevent orphan accumulation
+      const st = this.stateMgr.get();
+      for (const pos of Object.values(st.positions)) {
+        if (pos.conditionId !== id || pos.netShares <= 0) continue;
+        this.logger.warn(
+          `Market removed: selling ${pos.outcome} ${pos.netShares.toFixed(1)} shares ` +
+            `(${id.slice(0, 10)})`,
+        );
+        await this.fillHandler.forceSellPublic(pos.tokenId, id, pos.netShares);
+      }
     }
 
     this.activeMarkets = newMarkets;
@@ -441,6 +488,75 @@ export class MmEngine {
     });
 
     return this.scanner.getMarkets().length;
+  }
+
+  // ---- Liquidation / orphan handling ----------------------------------------
+
+  /**
+   * Liquidate all positions with netShares > 0.
+   * Returns summary of results.
+   */
+  async liquidateAllPositions(): Promise<{ success: number; failed: number }> {
+    const st = this.stateMgr.get();
+    let success = 0;
+    let failed = 0;
+
+    for (const pos of Object.values(st.positions)) {
+      if (pos.netShares <= 0) continue;
+
+      this.logger.info(
+        `Liquidating: ${pos.outcome} ${pos.netShares.toFixed(1)} shares (${pos.conditionId.slice(0, 10)})`,
+      );
+
+      const ok = await this.fillHandler.forceSellPublic(
+        pos.tokenId,
+        pos.conditionId,
+        pos.netShares,
+      );
+      if (ok) {
+        success++;
+      } else {
+        failed++;
+      }
+    }
+
+    this.logger.info(`Liquidation complete: ${success} sold, ${failed} failed`);
+    return { success, failed };
+  }
+
+  /**
+   * Detect positions in non-active markets and sell them as orphans.
+   */
+  private async sellOrphanPositions(activeConditionIds: string[]): Promise<void> {
+    const activeSet = new Set(activeConditionIds);
+    const st = this.stateMgr.get();
+    let orphanCount = 0;
+
+    for (const pos of Object.values(st.positions)) {
+      if (pos.netShares <= 0) continue;
+      if (activeSet.has(pos.conditionId)) continue;
+
+      orphanCount++;
+      this.logger.warn(
+        `Orphan position detected: ${pos.outcome} ${pos.netShares.toFixed(1)} shares ` +
+          `(${pos.conditionId.slice(0, 10)}), attempting sell`,
+      );
+
+      const ok = await this.fillHandler.forceSellPublic(
+        pos.tokenId,
+        pos.conditionId,
+        pos.netShares,
+      );
+      if (!ok) {
+        this.logger.warn(
+          `Failed to sell orphan ${pos.tokenId.slice(0, 10)}, will retry via pending sells`,
+        );
+      }
+    }
+
+    if (orphanCount > 0) {
+      this.logger.info(`Found ${orphanCount} orphan positions`);
+    }
   }
 
   // ---- Public API for Telegram commands ------------------------------------
