@@ -8,7 +8,7 @@ import requests
 import html2text
 
 ACCOUNT = os.environ.get('GMAIL_ACCOUNT', 'klchen0113@gmail.com')
-BOT_TOKEN = os.environ['BOT_TOKEN']
+BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '') or os.environ.get('BOT_TOKEN', '')
 CHAT_ID = os.environ.get('CHAT_ID', '6309937609')
 GEMINI_KEY = os.environ.get('GEMINI_API_KEY', '')
 DEEPSEEK_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
