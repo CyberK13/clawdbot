@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""一次性读取所有未读邮件，汇总成一条消息发送到 TG"""
+"""一次性读取所有未读邮件，汇总成一条消息发送到 TG
+AI: Gemini 3 Flash (primary) → DeepSeek (fallback)
+"""
 import json, os, sys, re, subprocess, time, logging, base64
 from urllib.parse import urlparse
 import requests
@@ -8,7 +10,8 @@ import html2text
 ACCOUNT = os.environ.get('GMAIL_ACCOUNT', 'klchen0113@gmail.com')
 BOT_TOKEN = os.environ['BOT_TOKEN']
 CHAT_ID = os.environ.get('CHAT_ID', '6309937609')
-DEEPSEEK_KEY = os.environ['DEEPSEEK_API_KEY']
+GEMINI_KEY = os.environ.get('GEMINI_API_KEY', '')
+DEEPSEEK_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [digest-all] %(levelname)s %(message)s', datefmt='%H:%M:%S')
 log = logging.getLogger('digest-all')
@@ -26,6 +29,10 @@ SKIP_DOMAINS = {
     'doubleclick.net','googlesyndication.com',
 }
 SKIP_URL_PATTERNS = ['unsubscribe','optout','opt-out','preference','click.','tracking.','trk.','opens.','beacon','pixel','1x1']
+
+# AI API config
+GEMINI_MODEL = 'gemini-3-flash-preview'
+GEMINI_URL = f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
 
 def run_gog(args, timeout=30):
     env = os.environ.copy()
@@ -117,7 +124,6 @@ def extract_article_urls(body_text):
     return good[:2]
 
 def fetch_medium_article(url):
-    """用 Playwright session 抓取 Medium 付费文章"""
     try:
         result = subprocess.run(
             ['python3', '/opt/clawdbot/medium-fetch.py', url],
@@ -129,13 +135,11 @@ def fetch_medium_article(url):
         log.warning('Medium fetch failed: %s', e)
     return None
 
-
 def fetch_article(url):
     if 'medium.com' in url:
         content = fetch_medium_article(url)
         if content:
             return content
-
     try:
         resp = requests.get(url, timeout=10, headers={
             'User-Agent': 'Mozilla/5.0 (compatible; ClawdBot/1.0)',
@@ -155,7 +159,33 @@ def mark_as_read(thread_id):
     run_gog(['gmail','thread','modify', thread_id,'--remove','UNREAD','--account',ACCOUNT,'--force'])
     log.info('Marked read: %s', thread_id[:16])
 
+def call_gemini(prompt):
+    """Call Gemini 3 Flash API"""
+    if not GEMINI_KEY:
+        log.warning('No GEMINI_API_KEY, skipping Gemini')
+        return None
+    try:
+        resp = requests.post(
+            f'{GEMINI_URL}?key={GEMINI_KEY}',
+            headers={'Content-Type': 'application/json'},
+            json={
+                'contents': [{'parts': [{'text': prompt}]}],
+                'generationConfig': {'temperature': 0.3, 'maxOutputTokens': 3000},
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data['candidates'][0]['content']['parts'][0]['text']
+    except Exception as e:
+        log.error('Gemini error: %s', e)
+        return None
+
 def call_deepseek(prompt):
+    """Fallback: DeepSeek API"""
+    if not DEEPSEEK_KEY:
+        log.warning('No DEEPSEEK_API_KEY, skipping DeepSeek')
+        return None
     try:
         resp = requests.post(
             'https://api.deepseek.com/v1/chat/completions',
@@ -173,6 +203,15 @@ def call_deepseek(prompt):
     except Exception as e:
         log.error('DeepSeek error: %s', e)
         return None
+
+def call_ai(prompt):
+    """Try Gemini 3 Flash first, fallback to DeepSeek"""
+    log.info('Calling Gemini 3 Flash...')
+    result = call_gemini(prompt)
+    if result:
+        return result
+    log.info('Gemini failed, falling back to DeepSeek...')
+    return call_deepseek(prompt)
 
 def send_tg(text):
     if len(text) > 4000:
@@ -212,6 +251,7 @@ except Exception:
 log.info('Found %d unread emails', len(emails))
 
 if not emails:
+    send_tg('📭 没有未读邮件')
     log.info('No unread emails')
     sys.exit(0)
 
@@ -261,8 +301,8 @@ for i, em in enumerate(all_emails, 1):
         for j, a in enumerate(em['articles'], 1):
             prompt += f"[文章{j}] {a['url'][:80]}\n{a['content'][:1000]}\n"
 
-log.info('Prompt size: %d chars, calling DeepSeek...', len(prompt))
-summary = call_deepseek(prompt)
+log.info('Prompt size: %d chars, calling AI...', len(prompt))
+summary = call_ai(prompt)
 
 if summary:
     header = f"📬 未读邮件汇总 ({len(all_emails)} 封)\n{'─'*30}\n\n"
@@ -278,4 +318,5 @@ if summary:
     else:
         log.error('TG send failed, NOT marking as read')
 else:
+    send_tg('❌ AI 摘要生成失败，请稍后重试')
     log.error('AI summary failed')

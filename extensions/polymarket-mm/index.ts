@@ -7,15 +7,16 @@
 //   - Tool: polymarket_mm for AI agent queries
 // ---------------------------------------------------------------------------
 
+import { spawn } from "node:child_process";
 import type {
   OpenClawPluginApi,
   OpenClawPluginToolFactory,
   AnyAgentTool,
 } from "../../src/plugins/types.js";
-import type { MmConfig } from "./types.js";
 import { formatConfig, resolveConfig } from "./config.js";
 import { MmEngine } from "./engine.js";
 import { createMmCommandHandler } from "./telegram-commands.js";
+import type { MmConfig } from "./types.js";
 
 let engine: MmEngine | null = null;
 
@@ -121,6 +122,29 @@ export default function register(api: OpenClawPluginApi) {
 
       const handler = createMmCommandHandler(engine);
       return handler(ctx);
+    },
+  });
+
+  // ---------- Command: /mail — on-demand email digest -----------------------
+  api.registerCommand({
+    name: "mail",
+    description: "读取所有未读邮件并生成 AI 摘要",
+    acceptsArgs: false,
+    requireAuth: true,
+    handler: async (ctx) => {
+      const scriptPath = "/opt/clawdbot/gmail-digest-all.py";
+      const chatId = ctx.senderId || "6309937609";
+
+      // Spawn script in background — it sends results to TG directly
+      const proc = spawn("python3", [scriptPath], {
+        stdio: "ignore",
+        detached: true,
+        env: { ...process.env, CHAT_ID: chatId },
+      });
+      proc.unref();
+
+      api.logger.info(`/mail triggered by ${ctx.senderId}, spawned gmail-digest-all.py`);
+      return { text: "📬 正在读取未读邮件并生成摘要，请稍候..." };
     },
   });
 
