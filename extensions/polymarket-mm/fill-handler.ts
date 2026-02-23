@@ -38,6 +38,8 @@ interface PendingSell {
 export class FillHandler {
   private logger: PluginLogger;
   private pendingSells: Map<string, PendingSell> = new Map(); // key = tokenId
+  /** Condition IDs of currently active markets (set by engine). */
+  private activeMarketIds: Set<string> = new Set();
 
   constructor(
     private client: PolymarketClient,
@@ -47,6 +49,11 @@ export class FillHandler {
     logger: PluginLogger,
   ) {
     this.logger = logger;
+  }
+
+  /** Update the set of active market condition IDs (called by engine on scan). */
+  setActiveMarkets(conditionIds: string[]): void {
+    this.activeMarketIds = new Set(conditionIds);
   }
 
   /**
@@ -74,6 +81,11 @@ export class FillHandler {
     if (!market) return;
 
     const exposureRatio = this.getExposureRatio();
+    this.logger.info(
+      `Exposure ratio: ${(exposureRatio * 100).toFixed(1)}% (active markets only, ` +
+        `thresholds: soft=${(this.config.maxExposureForSoftSell * 100).toFixed(0)}%, ` +
+        `hard=${(this.config.maxExposureForHardSell * 100).toFixed(0)}%)`,
+    );
 
     if (exposureRatio > this.config.maxExposureForHardSell) {
       await this.handleHighExposure(market);
@@ -123,11 +135,16 @@ export class FillHandler {
 
   // ---- Internal -----------------------------------------------------------
 
+  /**
+   * Calculate exposure ratio considering ONLY positions in active markets.
+   * Stale positions from resolved/expired markets are excluded to prevent
+   * false high-exposure triggers.
+   */
   private getExposureRatio(): number {
     const st = this.state.get();
     let totalExposure = 0;
     for (const pos of Object.values(st.positions)) {
-      if (pos.netShares > 0) {
+      if (pos.netShares > 0 && this.activeMarketIds.has(pos.conditionId)) {
         totalExposure += pos.netShares * pos.avgEntry;
       }
     }
@@ -216,22 +233,31 @@ export class FillHandler {
     fillSize: number,
     market: MmMarket,
   ): Promise<void> {
-    this.logger.warn(`Medium exposure fill recovery: widening spread + partial sell`);
+    this.logger.warn(
+      `Medium exposure fill recovery: widening spread + partial sell ` +
+        `(${order.tokenId.slice(0, 10)}, ${fillSize.toFixed(1)} shares)`,
+    );
 
     // Widen spread
     this.spreadController.widenSpread(order.conditionId, 1.5);
 
-    // FOK sell half the filled amount
-    const sellShares = fillSize * 0.5;
-    await this.forceSell(order.tokenId, order.conditionId, sellShares);
+    // FOK sell half the filled amount — only from the token that was just filled
+    const pos = this.state.getPosition(order.tokenId);
+    const available = pos ? Math.max(0, pos.netShares) : 0;
+    const sellShares = Math.min(fillSize * 0.5, available);
+    if (sellShares > 0) {
+      await this.forceSell(order.tokenId, order.conditionId, sellShares);
+    } else {
+      this.logger.warn(`No shares available to sell for ${order.tokenId.slice(0, 10)}`);
+    }
   }
 
   private async handleHighExposure(market: MmMarket): Promise<void> {
     this.logger.warn(
-      `HIGH exposure! Liquidating all positions for ${market.conditionId.slice(0, 10)}`,
+      `HIGH exposure! Liquidating positions for market ${market.conditionId.slice(0, 10)}`,
     );
 
-    // Sell all positions in this market
+    // Only sell positions in THIS active market — not all positions globally
     for (const token of market.tokens) {
       const pos = this.state.getPosition(token.tokenId);
       if (pos && pos.netShares > 0) {

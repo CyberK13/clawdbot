@@ -113,10 +113,18 @@ export class MmEngine {
     // Initial market scan
     await this.scanner.scan();
     this.activeMarkets = this.scanner.selectActiveMarkets(this.stateMgr.get().pausedMarkets);
+    const activeIds = this.activeMarkets.map((m) => m.conditionId);
+
+    // Prune stale positions from resolved/expired markets
+    const pruned = this.stateMgr.pruneStalePositions(activeIds);
+    if (pruned > 0) {
+      this.logger.info(`Pruned ${pruned} stale positions from resolved markets`);
+    }
+    this.fillHandler.setActiveMarkets(activeIds);
     this.stateMgr.update({
       running: true,
       startedAt: Date.now(),
-      activeMarkets: this.activeMarkets.map((m) => m.conditionId),
+      activeMarkets: activeIds,
       killSwitchTriggered: false,
     });
 
@@ -425,8 +433,10 @@ export class MmEngine {
     }
 
     this.activeMarkets = newMarkets;
+    const newIds = newMarkets.map((m) => m.conditionId);
+    this.fillHandler.setActiveMarkets(newIds);
     this.stateMgr.update({
-      activeMarkets: newMarkets.map((m) => m.conditionId),
+      activeMarkets: newIds,
       lastScanAt: Date.now(),
     });
 

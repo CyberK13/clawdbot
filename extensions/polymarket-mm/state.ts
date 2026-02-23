@@ -190,6 +190,28 @@ export class StateManager {
     return total;
   }
 
+  /**
+   * Remove positions that don't belong to any active market.
+   * Stale positions from resolved/expired markets pollute exposure calculations.
+   * Returns the number of positions pruned.
+   */
+  pruneStalePositions(activeConditionIds: string[]): number {
+    const activeSet = new Set(activeConditionIds);
+    let pruned = 0;
+    for (const [tokenId, pos] of Object.entries(this.state.positions)) {
+      if (!activeSet.has(pos.conditionId)) {
+        this.logger.info(
+          `Pruning stale position: ${pos.outcome} ${pos.netShares.toFixed(1)} shares ` +
+            `(condition ${pos.conditionId.slice(0, 12)}…)`,
+        );
+        delete this.state.positions[tokenId];
+        pruned++;
+      }
+    }
+    if (pruned > 0) this.dirty = true;
+    return pruned;
+  }
+
   /** Get net exposure for a specific market (across both tokens). */
   getMarketExposure(conditionId: string, priceMap: Map<string, number>): number {
     let total = 0;
