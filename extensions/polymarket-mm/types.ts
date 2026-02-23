@@ -16,8 +16,14 @@ export interface MmConfig {
   // Capital
   totalCapital: number;
   maxCapitalPerMarket: number;
+  /** Fraction of capital to keep as reserve (0-1) */
+  reserveRatio: number;
 
-  // Quoting
+  // Quoting — dynamic spread ratios (fraction of market's maxSpread)
+  defaultSpreadRatio: number;
+  minSpreadRatio: number;
+  maxSpreadRatio: number;
+  /** Legacy fixed spread fields (used as fallback) */
   defaultSpread: number;
   minSpread: number;
   maxSpread: number;
@@ -42,6 +48,14 @@ export interface MmConfig {
   maxConcurrentMarkets: number;
   minDailyVolume: number;
   minRewardRate: number;
+
+  // Fill recovery
+  fillRecoveryTimeoutMs: number;
+  maxExposureForSoftSell: number;
+  maxExposureForHardSell: number;
+
+  // Reconciliation
+  reconcileIntervalMs: number;
 }
 
 // ---- Market ----------------------------------------------------------------
@@ -153,6 +167,10 @@ export interface MmState {
   killSwitchTriggered: boolean;
   dayPaused: boolean;
   rewardHistory: Array<{ date: string; estimated: number; actual?: number }>;
+  /** Fill history for spread controller */
+  fillHistory: FillEvent[];
+  /** Dynamic spread state */
+  spreadState: SpreadState;
 }
 
 // ---- Reward scoring (Polymarket formula) -----------------------------------
@@ -187,6 +205,29 @@ export interface RewardScore {
   qMin: number;
   midpoint: number;
   twoSided: boolean;
+  timestamp: number;
+}
+
+// ---- Spread controller state -----------------------------------------------
+
+export interface SpreadState {
+  /** Current spread ratio (0.20 - 0.80 of maxSpread) */
+  currentRatio: number;
+  /** Fills in the last hour per market */
+  fillsPerHour: Record<string, number>;
+  /** Timestamp of last adjustment */
+  lastAdjustedAt: number;
+}
+
+// ---- Fill events -----------------------------------------------------------
+
+export interface FillEvent {
+  orderId: string;
+  tokenId: string;
+  conditionId: string;
+  side: "BUY" | "SELL";
+  price: number;
+  size: number;
   timestamp: number;
 }
 

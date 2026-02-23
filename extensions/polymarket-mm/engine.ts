@@ -11,10 +11,10 @@
 // ---------------------------------------------------------------------------
 
 import type { PluginLogger } from "../../src/plugins/types.js";
-import type { MmConfig, MmMarket, BookSnapshot, TargetQuote, TrackedOrder } from "./types.js";
 import { PolymarketClient, type ClientOptions } from "./client.js";
 import { resolveConfig } from "./config.js";
 import { DashboardServer } from "./dashboard-server.js";
+import { FillHandler } from "./fill-handler.js";
 import { InventoryManager } from "./inventory-manager.js";
 import { MarketScanner } from "./market-scanner.js";
 import { OpportunisticTrader } from "./opportunistic-trader.js";
@@ -22,7 +22,9 @@ import { OrderManager } from "./order-manager.js";
 import { QuoteEngine } from "./quote-engine.js";
 import { RewardTracker } from "./reward-tracker.js";
 import { RiskController } from "./risk-controller.js";
+import { SpreadController } from "./spread-controller.js";
 import { StateManager } from "./state.js";
+import type { MmConfig, MmMarket, BookSnapshot, TargetQuote, TrackedOrder } from "./types.js";
 import { sleep, todayUTC, fmtUsd } from "./utils.js";
 
 export class MmEngine {
@@ -35,6 +37,8 @@ export class MmEngine {
   private risk: RiskController;
   private rewards: RewardTracker;
   private opportunistic: OpportunisticTrader;
+  private spreadController: SpreadController;
+  private fillHandler: FillHandler;
 
   private config: MmConfig;
   private logger: PluginLogger;
@@ -67,11 +71,25 @@ export class MmEngine {
 
     this.scanner = new MarketScanner(this.client, this.config, logger);
     this.inventory = new InventoryManager(this.client, this.stateMgr, this.config, logger);
-    this.quoteEngine = new QuoteEngine(this.inventory, this.stateMgr, this.config, logger);
+    this.spreadController = new SpreadController(this.stateMgr, this.config, logger);
+    this.quoteEngine = new QuoteEngine(
+      this.inventory,
+      this.stateMgr,
+      this.config,
+      this.spreadController,
+      logger,
+    );
     this.orderMgr = new OrderManager(this.client, this.stateMgr, this.config, logger);
     this.risk = new RiskController(this.client, this.stateMgr, this.inventory, this.config, logger);
     this.rewards = new RewardTracker(this.client, this.stateMgr, this.quoteEngine, logger);
     this.opportunistic = new OpportunisticTrader(this.client, this.stateMgr, this.config, logger);
+    this.fillHandler = new FillHandler(
+      this.client,
+      this.stateMgr,
+      this.spreadController,
+      this.config,
+      logger,
+    );
   }
 
   // ---- Lifecycle -----------------------------------------------------------
@@ -203,7 +221,7 @@ export class MmEngine {
       // --- Every tick (5s): fill detection + risk check ---
       const fills = await this.orderMgr.detectFills();
       for (const { order, fillSize } of fills) {
-        this.handleFill(order, fillSize);
+        await this.handleFill(order, fillSize);
       }
 
       // Update books for active markets
@@ -234,9 +252,11 @@ export class MmEngine {
         await this.opportunistic.checkOpportunities(this.activeMarkets, this.books);
       }
 
-      // --- Every 12 ticks (60s): reward scoring check ---
+      // --- Every 12 ticks (60s): reward scoring + fill timeout + spread decay ---
       if (this.tickCount % 12 === 0) {
         await this.rewards.checkScoring();
+        await this.fillHandler.checkTimeouts();
+        this.spreadController.decayOverride();
       }
 
       // --- Every 60 ticks (5 min): balance refresh ---
@@ -330,7 +350,7 @@ export class MmEngine {
     }
   }
 
-  private handleFill(order: TrackedOrder, fillSize: number): void {
+  private async handleFill(order: TrackedOrder, fillSize: number): Promise<void> {
     const market = this.activeMarkets.find((m) => m.conditionId === order.conditionId);
 
     // Update position
@@ -346,10 +366,15 @@ export class MmEngine {
     // Record fill for adverse selection detection
     this.risk.recordFill(order.conditionId);
 
+    const fillValue = (fillSize * order.price).toFixed(2);
+    const emoji = order.side === "BUY" ? "🟢" : "🔴";
     this.logger.info(
-      `Fill: ${order.side} ${fillSize.toFixed(1)} @ ${order.price.toFixed(3)} ` +
-        `(${market?.question.slice(0, 20) ?? "?"}…)`,
+      `${emoji} Fill: ${order.side} ${fillSize.toFixed(1)} @ ${order.price.toFixed(3)} ($${fillValue}) ` +
+        `(${market?.question.slice(0, 30) ?? "?"}…)`,
     );
+
+    // Delegate to FillHandler for capital recovery (BUY fills only)
+    await this.fillHandler.handleFill(order, fillSize, market);
   }
 
   private async handleRiskAction(action: import("./types.js").RiskAction): Promise<void> {
@@ -381,7 +406,7 @@ export class MmEngine {
         break;
 
       case "widen_spread":
-        // Will take effect via higher fill rate detection on next quote cycle
+        this.spreadController.widenSpread(action.conditionId, action.factor);
         break;
     }
   }
@@ -481,6 +506,13 @@ export class MmEngine {
       .getTrackedOrders()
       .filter((o) => o.status === "filled" && o.filledSize > 0)
       .sort((a, b) => b.placedAt - a.placedAt)
+      .slice(0, count);
+  }
+
+  getRecentFillEvents(count: number): import("./types.js").FillEvent[] {
+    return this.stateMgr
+      .getRecentFillsAll()
+      .sort((a, b) => b.timestamp - a.timestamp)
       .slice(0, count);
   }
 

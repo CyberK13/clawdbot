@@ -137,3 +137,43 @@ channels:
 commands:
   native: "auto"
   text: true
+
+# --------------------------------------------
+# Webhook / Gmail 配置
+# --------------------------------------------
+hooks:
+  enabled: true
+  token: "${OPENCLAW_HOOK_TOKEN}"
+  path: "/hooks"
+  presets: ["gmail"]
+
+  gmail:
+    account: "${GMAIL_ACCOUNT}" # klchen0113@gmail.com
+    model: "google/gemini-2.0-flash"
+    thinking: "off"
+    topic: "gog-gmail-watch"
+    subscription: "gog-gmail-watch-push"
+    pushToken: "gmail-push-token-clawdbot-2026"
+    hookUrl: "http://127.0.0.1:18789/hooks/gmail"
+    serve:
+      bind: "127.0.0.1"
+      port: 8788
+      path: "/gmail-pubsub"
+
+  mappings:
+    # Kyle 的 Gmail → Telegram 通知
+    - match: { path: "gmail" }
+      action: "agent"
+      agentId: "user1"
+      wakeMode: "now"
+      name: "Gmail"
+      sessionKey: "hook:gmail:{{messages[0].id}}"
+      messageTemplate: |
+        📧 新邮件
+        发件人: {{messages[0].from}}
+        主题: {{messages[0].subject}}
+        ---
+        {{messages[0].snippet}}
+      deliver: true
+      channel: "telegram"
+      to: "6309937609" # Kyle 的 TG ID

@@ -3,8 +3,8 @@
 // ---------------------------------------------------------------------------
 
 import type { PluginCommandContext, PluginCommandResult } from "../../src/plugins/types.js";
-import type { MmEngine } from "./engine.js";
 import { formatConfig } from "./config.js";
+import type { MmEngine } from "./engine.js";
 import { fmtUsd, fmtPct, fmtDuration, truncQ } from "./utils.js";
 
 /**
@@ -32,6 +32,8 @@ export function createMmCommandHandler(engine: MmEngine) {
         return handleRewards(engine);
       case "trades":
         return handleTrades(engine, args[1]);
+      case "fills":
+        return handleFills(engine, args[1]);
       case "pause":
         return handlePause(engine, args[1]);
       case "resume":
@@ -183,6 +185,34 @@ function handleTrades(engine: MmEngine, countStr?: string): PluginCommandResult 
   return { text };
 }
 
+function handleFills(engine: MmEngine, countStr?: string): PluginCommandResult {
+  const count = parseInt(countStr || "10", 10) || 10;
+  const fills = engine.getRecentFillEvents(count);
+
+  if (fills.length === 0) {
+    return { text: "最近1小时无成交" };
+  }
+
+  let totalBuyValue = 0;
+  let totalSellValue = 0;
+
+  let text = `📝 最近 ${fills.length} 笔成交（1小时内）:\n`;
+  for (const f of fills) {
+    const time = new Date(f.timestamp).toLocaleTimeString("zh-CN");
+    const value = f.size * f.price;
+    const emoji = f.side === "BUY" ? "🟢" : "🔴";
+    text += `  ${emoji} ${f.side} ${f.size.toFixed(1)} @ ${f.price.toFixed(3)} ($${value.toFixed(2)}) | ${time}\n`;
+
+    if (f.side === "BUY") totalBuyValue += value;
+    else totalSellValue += value;
+  }
+
+  text += `\n📊 汇总: 买入 $${totalBuyValue.toFixed(2)} | 卖出 $${totalSellValue.toFixed(2)}`;
+  text += ` | 净敞口 $${(totalBuyValue - totalSellValue).toFixed(2)}`;
+
+  return { text };
+}
+
 async function handlePause(engine: MmEngine, conditionId?: string): Promise<PluginCommandResult> {
   if (!conditionId) {
     return { text: "用法: /mm pause <condition_id 或市场编号>" };
@@ -289,6 +319,7 @@ function handleHelp(): PluginCommandResult {
       "  /mm config      - 查看/修改配置",
       "  /mm rewards     - 查看奖励",
       "  /mm trades [n]  - 查看最近成交",
+      "  /mm fills [n]   - 查看最近1小时填充记录",
       "  /mm redeem [id] - 赎回已结算持仓",
       "  /mm pause <id>  - 暂停市场",
       "  /mm resume <id> - 恢复市场",

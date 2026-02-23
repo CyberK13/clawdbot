@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { PluginLogger } from "../../src/plugins/types.js";
-import type { MmState, TrackedOrder, Position } from "./types.js";
+import type { MmState, TrackedOrder, Position, FillEvent, SpreadState } from "./types.js";
 import { todayUTC } from "./utils.js";
 
 const STATE_FILE = "polymarket-mm.json";
@@ -31,6 +31,8 @@ function defaultState(): MmState {
     killSwitchTriggered: false,
     dayPaused: false,
     rewardHistory: [],
+    fillHistory: [],
+    spreadState: { currentRatio: 0.35, fillsPerHour: {}, lastAdjustedAt: 0 },
   };
 }
 
@@ -219,6 +221,32 @@ export class StateManager {
     return Object.values(this.state.trackedOrders).filter(
       (o) => o.conditionId === conditionId && o.status === "live",
     );
+  }
+
+  // ---- Fill history --------------------------------------------------------
+
+  /** Record a fill event and trim old entries. */
+  recordFill(fill: FillEvent): void {
+    if (!this.state.fillHistory) this.state.fillHistory = [];
+    this.state.fillHistory.push(fill);
+    // Keep last 2 hours of fills
+    const cutoff = Date.now() - 2 * 3600_000;
+    this.state.fillHistory = this.state.fillHistory.filter((f) => f.timestamp >= cutoff);
+    this.dirty = true;
+  }
+
+  /** Count fills in the last hour for a specific market. */
+  getFillsPerHour(conditionId: string): number {
+    const cutoff = Date.now() - 3600_000;
+    return (this.state.fillHistory || []).filter(
+      (f) => f.conditionId === conditionId && f.timestamp >= cutoff,
+    ).length;
+  }
+
+  /** Get all fills in the last hour (all markets). */
+  getRecentFillsAll(): FillEvent[] {
+    const cutoff = Date.now() - 3600_000;
+    return (this.state.fillHistory || []).filter((f) => f.timestamp >= cutoff);
   }
 
   // ---- Persistence ---------------------------------------------------------

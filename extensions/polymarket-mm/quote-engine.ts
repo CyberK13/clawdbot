@@ -31,6 +31,7 @@
 import type { TickSize, OrderBookSummary } from "@polymarket/clob-client";
 import type { PluginLogger } from "../../src/plugins/types.js";
 import type { InventoryManager } from "./inventory-manager.js";
+import type { SpreadController } from "./spread-controller.js";
 import type { StateManager } from "./state.js";
 import type { MmConfig, MmMarket, TargetQuote, BookSnapshot } from "./types.js";
 import { roundPrice, clampPrice, roundSize, usdcToShares, scoringFunction } from "./utils.js";
@@ -45,6 +46,7 @@ export class QuoteEngine {
     private inventory: InventoryManager,
     private state: StateManager,
     private config: MmConfig,
+    private spreadController: SpreadController,
     logger: PluginLogger,
   ) {
     this.logger = logger;
@@ -115,15 +117,14 @@ export class QuoteEngine {
     // Calculate inventory skew
     const skew = this.inventory.calculateSkew(market, midpoint);
 
-    // Optimal spread: as tight as possible for maximum ((v-s)/v)² reward score.
-    // At 1 tick vs 60% maxSpread, the score ratio is ~3.2x better.
-    // Risk: easier to get filled (adverse selection), mitigated by small size + skew.
-    //
-    // negRisk markets: local orderbook is sparse (bid~0.001, ask~0.999) because
-    // real liquidity comes from complement-implied orders invisible in our book.
-    // Using 1-tick spread causes "crosses book" errors. Use 2 ticks minimum.
+    // Dynamic spread: use SpreadController to calculate optimal spread
+    // based on fill rate, risk state, and market's maxSpread.
+    // Falls back to legacy fixed spread when maxSpread is unavailable.
+    const baseHalfSpread =
+      maxSpread > 0
+        ? this.spreadController.calculateSpread(maxSpread, market.conditionId, tick, market.negRisk)
+        : Math.max(market.negRisk ? 2 * tick : tick, this.config.defaultSpread);
     const minTicks = market.negRisk ? 2 * tick : tick;
-    const baseHalfSpread = Math.max(minTicks, Math.min(this.config.defaultSpread, maxSpread * 0.9));
 
     // Adaptive order sizing: ensure shares >= minScoringSize for reward eligibility.
     // If fixed orderSize doesn't produce enough shares, auto-scale up.
