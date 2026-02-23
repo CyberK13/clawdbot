@@ -52,10 +52,24 @@ export const DEFAULT_CONFIG: MmConfig = {
 
   // Exit / liquidation safety
   minSellPriceRatio: 0.5, // won't force sell below 50% of entry price
-  forceSellMaxRetries: 5, // retries per split level
-  forceSellRetryDelayMs: 30_000, // 30s between retries
+  forceSellMaxRetries: 5, // retries per split level (legacy, used as fallback)
+  forceSellRetryDelayMs: 30_000, // 30s between retries (low urgency)
   liquidateOnStop: false, // don't liquidate on graceful stop by default
   liquidateOnKill: true, // attempt liquidation on kill
+  maxPendingSellAgeMs: 600_000, // 10 min → disable min price protection (emergency mode)
+
+  // Multi-level quoting
+  levelSizeWeights: [0.55, 0.3, 0.15], // inner level gets most capital
+  levelSpreadMultiplier: 1.4, // each level 40% wider
+
+  // Continuous spread model
+  volatilityWeight: 3.0, // realized vol × weight → spread adjustment
+  inventorySpreadPenalty: 0.5, // exposure ratio × penalty → spread widening
+
+  // Fast split progression
+  forceSellMaxRetriesPerSplit: 3, // 3 retries per split level (faster than 5)
+  forceSellMinSplitFactor: 0.1, // minimum 10% split (was implicit 25%)
+  forceSellUrgentRetryDelayMs: 10_000, // 10s for critical urgency
 };
 
 /** Merge user overrides onto defaults, validating ranges. */
@@ -89,6 +103,27 @@ export function resolveConfig(overrides?: Partial<MmConfig>): MmConfig {
   cfg.minSellPriceRatio = clamp(cfg.minSellPriceRatio, 0.1, 0.95);
   cfg.forceSellMaxRetries = clamp(cfg.forceSellMaxRetries, 1, 20);
   cfg.forceSellRetryDelayMs = Math.max(5_000, cfg.forceSellRetryDelayMs);
+  cfg.maxPendingSellAgeMs = Math.max(120_000, cfg.maxPendingSellAgeMs);
+
+  // Multi-level quoting
+  if (!Array.isArray(cfg.levelSizeWeights) || cfg.levelSizeWeights.length === 0) {
+    cfg.levelSizeWeights = [1.0];
+  }
+  // Normalize weights to sum to 1.0
+  const weightSum = cfg.levelSizeWeights.reduce((s, w) => s + w, 0);
+  if (weightSum > 0 && Math.abs(weightSum - 1.0) > 0.01) {
+    cfg.levelSizeWeights = cfg.levelSizeWeights.map((w) => w / weightSum);
+  }
+  cfg.levelSpreadMultiplier = clamp(cfg.levelSpreadMultiplier, 1.0, 3.0);
+
+  // Continuous spread model
+  cfg.volatilityWeight = clamp(cfg.volatilityWeight, 0, 10);
+  cfg.inventorySpreadPenalty = clamp(cfg.inventorySpreadPenalty, 0, 2);
+
+  // Fast split progression
+  cfg.forceSellMaxRetriesPerSplit = clamp(cfg.forceSellMaxRetriesPerSplit, 1, 10);
+  cfg.forceSellMinSplitFactor = clamp(cfg.forceSellMinSplitFactor, 0.05, 0.5);
+  cfg.forceSellUrgentRetryDelayMs = Math.max(5_000, cfg.forceSellUrgentRetryDelayMs);
 
   return cfg;
 }
@@ -101,7 +136,7 @@ function clamp(v: number, min: number, max: number): number {
 export function formatConfig(cfg: MmConfig): string {
   const lines = [
     `💰 资金: $${cfg.totalCapital} (单市场 $${cfg.maxCapitalPerMarket}, 预留 ${(cfg.reserveRatio * 100).toFixed(0)}%)`,
-    `📊 报价: spreadRatio=${cfg.defaultSpreadRatio} [${cfg.minSpreadRatio}-${cfg.maxSpreadRatio}], size=$${cfg.orderSize}, levels=${cfg.numLevels}`,
+    `📊 报价: spreadRatio=${cfg.defaultSpreadRatio} [${cfg.minSpreadRatio}-${cfg.maxSpreadRatio}], size=$${cfg.orderSize}, levels=${cfg.numLevels}, volW=${cfg.volatilityWeight}, invP=${cfg.inventorySpreadPenalty}`,
     `🔄 刷新: ${cfg.refreshIntervalMs / 1000}s`,
     `📦 库存: max=$${cfg.maxInventoryPerMarket}, skew=${cfg.skewFactor}`,
     `🛡️ 风控: exposure=$${cfg.maxTotalExposure}, drawdown=${cfg.maxDrawdownPercent}%, dailyLoss=$${cfg.maxDailyLoss}`,

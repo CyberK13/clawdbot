@@ -15,6 +15,7 @@ import type { MarketReward, TickSize } from "@polymarket/clob-client";
 import type { PluginLogger } from "../../src/plugins/types.js";
 import type { PolymarketClient } from "./client.js";
 import type { MmConfig, MmMarket, MmToken } from "./types.js";
+import { scoringFunction } from "./utils.js";
 
 /** How many candidates to fetch full details for (avoid 3000+ API calls). */
 const CANDIDATE_POOL_SIZE = 30;
@@ -184,11 +185,12 @@ export class MarketScanner {
       // non-critical
     }
 
-    // Score: reward per dollar deployed, adjusted for competition
-    // Higher daily rate + lower capital requirement + lower competition = better
+    // Score: reward per dollar deployed, adjusted for scoring-weighted competition
+    // Wider maxSpread markets are easier to score in → boost with sqrt(maxSpread/0.03)
     const TWO_SIDED_BOOST = 3.0;
+    const spreadBoost = Math.sqrt(maxSpreadPrice / 0.03);
     const score =
-      (cand.dailyRate * TWO_SIDED_BOOST) / (competition / 100 + 1) / (requiredCapital + 1);
+      (cand.dailyRate * TWO_SIDED_BOOST * spreadBoost) / (competition + 50) / (requiredCapital + 1);
 
     const mmTokens: MmToken[] = [
       {
@@ -224,26 +226,33 @@ export class MarketScanner {
   private midFromBook(book: any): number {
     const bids = book.bids || [];
     const asks = book.asks || [];
-    const bestBid = bids.length > 0 ? parseFloat(bids[0].price) : 0;
+    // CLOB API returns bids ascending (lowest first) — best bid is LAST
+    const bestBid = bids.length > 0 ? parseFloat(bids[bids.length - 1].price) : 0;
     const bestAsk = asks.length > 0 ? parseFloat(asks[0].price) : 1;
     return (bestBid + bestAsk) / 2;
   }
 
-  /** Total resting USDC within the scoring spread around midpoint. */
+  /**
+   * Score-weighted competition within the scoring spread.
+   * Uses the actual scoring function S(v,s) to weight orders by their
+   * reward contribution, not just raw USDC volume.
+   */
   private measureCompetition(book: any, mid: number, maxSpread: number): number {
-    let totalUsd = 0;
+    let weightedScore = 0;
     for (const bid of book.bids || []) {
       const price = parseFloat(bid.price);
-      if (mid - price <= maxSpread) {
-        totalUsd += parseFloat(bid.size) * price;
+      const spread = mid - price;
+      if (spread > 0 && spread <= maxSpread) {
+        weightedScore += scoringFunction(maxSpread, spread, parseFloat(bid.size));
       }
     }
     for (const ask of book.asks || []) {
       const price = parseFloat(ask.price);
-      if (price - mid <= maxSpread) {
-        totalUsd += parseFloat(ask.size) * price;
+      const spread = price - mid;
+      if (spread > 0 && spread <= maxSpread) {
+        weightedScore += scoringFunction(maxSpread, spread, parseFloat(ask.size));
       }
     }
-    return totalUsd;
+    return weightedScore;
   }
 }

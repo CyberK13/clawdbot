@@ -68,6 +68,28 @@ export interface MmConfig {
   liquidateOnStop: boolean;
   /** Whether to liquidate positions on emergency kill */
   liquidateOnKill: boolean;
+  /** Max age for pending sells before disabling min price protection (ms) */
+  maxPendingSellAgeMs: number;
+
+  // Multi-level quoting
+  /** Size distribution weights per level (must sum to ~1.0) */
+  levelSizeWeights: number[];
+  /** Spread multiplier between successive levels */
+  levelSpreadMultiplier: number;
+
+  // Continuous spread model factors
+  /** Weight for realized volatility adjustment (0 disables) */
+  volatilityWeight: number;
+  /** Penalty for inventory/exposure ratio on spread (0 disables) */
+  inventorySpreadPenalty: number;
+
+  // Fast split progression
+  /** Max retries per split level before reducing */
+  forceSellMaxRetriesPerSplit: number;
+  /** Minimum split factor before reset */
+  forceSellMinSplitFactor: number;
+  /** Retry delay for urgent/critical pending sells (ms) */
+  forceSellUrgentRetryDelayMs: number;
 }
 
 // ---- Market ----------------------------------------------------------------
@@ -230,6 +252,8 @@ export interface SpreadState {
   fillsPerHour: Record<string, number>;
   /** Timestamp of last adjustment */
   lastAdjustedAt: number;
+  /** Realized volatility per market (5min window) */
+  volatility: Record<string, number>;
 }
 
 // ---- Fill events -----------------------------------------------------------
@@ -254,8 +278,30 @@ export interface PendingSell {
   sellOrderId?: string; // limit SELL order ID if placed
   retryCount: number;
   lastAttemptAt: number;
-  /** Split progression: 1.0 → 0.5 → 0.25 of original shares */
+  /** Split progression: 1.0 → 0.5 → 0.25 → 0.10 of original shares */
   splitFactor: number;
+  /** Midpoint at the time of the fill that created this pending sell */
+  fillMidpoint?: number;
+  /** Urgency level based on adverse price movement */
+  urgency?: "low" | "medium" | "high" | "critical";
+  /** Whether the SELL order is within scoring spread (earning rewards) */
+  isScoring?: boolean;
+}
+
+// ---- Toxicity analysis ---------------------------------------------------
+
+export interface ToxicityAnalysis {
+  conditionId: string;
+  /** Directionality: 0 = balanced fills, 1 = all one-sided */
+  directionality: number;
+  /** Whether average fill size is anomalously large */
+  sizeAnomaly: boolean;
+  /** Final toxic determination */
+  isToxic: boolean;
+  /** Total fills in window */
+  totalFills: number;
+  /** Dominant side */
+  dominantSide: "BUY" | "SELL";
 }
 
 // ---- Events ----------------------------------------------------------------

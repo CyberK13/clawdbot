@@ -118,11 +118,17 @@ export class QuoteEngine {
     const skew = this.inventory.calculateSkew(market, midpoint);
 
     // Dynamic spread: use SpreadController to calculate optimal spread
-    // based on fill rate, risk state, and market's maxSpread.
+    // based on fill rate, volatility, inventory, and market's maxSpread.
     // Falls back to legacy fixed spread when maxSpread is unavailable.
     const baseHalfSpread =
       maxSpread > 0
-        ? this.spreadController.calculateSpread(maxSpread, market.conditionId, tick, market.negRisk)
+        ? this.spreadController.calculateSpread(
+            maxSpread,
+            market.conditionId,
+            tick,
+            market.negRisk,
+            midpoint,
+          )
         : Math.max(market.negRisk ? 2 * tick : tick, this.config.defaultSpread);
     const minTicks = market.negRisk ? 2 * tick : tick;
 
@@ -139,11 +145,20 @@ export class QuoteEngine {
     const availableShares = pos ? Math.max(0, pos.netShares) : 0;
     const canSell = availableShares > 0;
 
+    // Size weights for multi-level quoting
+    const weights = this.config.levelSizeWeights;
+    const spreadMult = this.config.levelSpreadMultiplier;
+
     for (let level = 0; level < this.config.numLevels; level++) {
-      const levelSpread = baseHalfSpread + level * tick;
+      // Multi-level: each level uses geometrically increasing spread
+      const levelSpreadMult = level === 0 ? 1.0 : Math.pow(spreadMult, level);
+      const levelSpread = baseHalfSpread * levelSpreadMult;
 
       // Skip if this level would exceed max scoring spread
       if (levelSpread >= maxSpread) break;
+
+      // Size weight for this level (fall back to equal distribution)
+      const sizeWeight = level < weights.length ? weights[level] : 1.0 / this.config.numLevels;
 
       // --- BID (buy) ---
       // When long (positive skew): widen bid (less aggressive buying)
@@ -152,6 +167,12 @@ export class QuoteEngine {
       let bidPrice = midpoint - bidSpread;
       bidPrice = roundPrice(clampPrice(bidPrice, tickSize), tickSize, "BUY");
 
+      // If rounding pushed spread to/beyond maxSpread, nudge one tick toward midpoint
+      if (midpoint - bidPrice >= maxSpread && bidPrice + tick < midpoint) {
+        bidPrice += tick;
+        bidPrice = roundPrice(bidPrice, tickSize, "BUY");
+      }
+
       // Ensure bid doesn't cross the book (must be < best ask for post-only)
       if (book.bestAsk > 0 && bidPrice >= book.bestAsk) {
         bidPrice = roundPrice(book.bestAsk - tick, tickSize, "BUY");
@@ -159,12 +180,13 @@ export class QuoteEngine {
 
       // Ensure bid stays within scoring range
       const bidActualSpread = midpoint - bidPrice;
-      if (bidActualSpread < maxSpread && bidPrice > 0) {
-        // Adaptive sizing: guarantee shares >= minScoringSize
-        const baseShares = usdcToShares(this.config.orderSize * sizeFactor, bidPrice);
+      if (bidActualSpread <= maxSpread && bidPrice > 0) {
+        // Adaptive sizing with level weight: guarantee shares >= minScoringSize
+        const levelOrderSize = this.config.orderSize * sizeFactor * sizeWeight;
+        const baseShares = usdcToShares(levelOrderSize, bidPrice);
         const targetShares = Math.max(minScoringSize, baseShares);
         const adjustedUsdc = targetShares * bidPrice;
-        const cappedUsdc = Math.min(adjustedUsdc, maxOrderUsdc);
+        const cappedUsdc = Math.min(adjustedUsdc, maxOrderUsdc * sizeWeight);
         const bidShares = usdcToShares(cappedUsdc, bidPrice);
         const roundedBidShares = roundSize(bidShares, tickSize);
 
@@ -188,6 +210,12 @@ export class QuoteEngine {
       let askPrice = midpoint + askSpread;
       askPrice = roundPrice(clampPrice(askPrice, tickSize), tickSize, "SELL");
 
+      // If rounding pushed spread to/beyond maxSpread, nudge one tick toward midpoint
+      if (askPrice - midpoint >= maxSpread && askPrice - tick > midpoint) {
+        askPrice -= tick;
+        askPrice = roundPrice(askPrice, tickSize, "SELL");
+      }
+
       // Ensure ask doesn't cross the book (must be > best bid for post-only)
       if (book.bestBid > 0 && askPrice <= book.bestBid) {
         askPrice = roundPrice(book.bestBid + tick, tickSize, "SELL");
@@ -195,9 +223,10 @@ export class QuoteEngine {
 
       // Ensure ask stays within scoring range
       const askActualSpread = askPrice - midpoint;
-      if (askActualSpread < maxSpread && askPrice < 1) {
-        // Cap sell size at available inventory
-        const askShares = Math.min(usdcToShares(this.config.orderSize, askPrice), availableShares);
+      if (askActualSpread <= maxSpread && askPrice < 1) {
+        // Cap sell size at available inventory, weighted by level
+        const levelAskSize = this.config.orderSize * sizeWeight;
+        const askShares = Math.min(usdcToShares(levelAskSize, askPrice), availableShares);
         const roundedAskShares = roundSize(askShares, tickSize);
 
         if (roundedAskShares >= minScoringSize && roundedAskShares > 0) {
@@ -282,7 +311,9 @@ export class QuoteEngine {
       size: parseFloat(a.size),
     }));
 
-    const bestBid = bids.length > 0 ? bids[0].price : 0;
+    // CLOB API returns bids ascending (lowest first) — best bid is LAST
+    const bestBid = bids.length > 0 ? bids[bids.length - 1].price : 0;
+    // Asks are also ascending (lowest first) — best ask is FIRST (correct)
     const bestAsk = asks.length > 0 ? asks[0].price : 1;
     const midpoint = (bestBid + bestAsk) / 2;
     const spread = bestAsk - bestBid;

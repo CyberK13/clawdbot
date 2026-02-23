@@ -40,7 +40,7 @@ function defaultState(): MmState {
     dayPaused: false,
     rewardHistory: [],
     fillHistory: [],
-    spreadState: { currentRatio: 0.35, fillsPerHour: {}, lastAdjustedAt: 0 },
+    spreadState: { currentRatio: 0.35, fillsPerHour: {}, lastAdjustedAt: 0, volatility: {} },
   };
 }
 

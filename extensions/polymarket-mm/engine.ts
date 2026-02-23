@@ -24,7 +24,14 @@ import { RewardTracker } from "./reward-tracker.js";
 import { RiskController } from "./risk-controller.js";
 import { SpreadController } from "./spread-controller.js";
 import { StateManager } from "./state.js";
-import type { MmConfig, MmMarket, BookSnapshot, TargetQuote, TrackedOrder } from "./types.js";
+import type {
+  MmConfig,
+  MmMarket,
+  BookSnapshot,
+  TargetQuote,
+  TrackedOrder,
+  PendingSell,
+} from "./types.js";
 import { sleep, todayUTC, fmtUsd } from "./utils.js";
 
 export class MmEngine {
@@ -90,6 +97,8 @@ export class MmEngine {
       this.config,
       logger,
     );
+    // Wire risk controller → fill handler for toxicity analysis
+    this.fillHandler.setRiskController(this.risk);
   }
 
   // ---- Lifecycle -----------------------------------------------------------
@@ -343,6 +352,17 @@ export class MmEngine {
 
   private async refreshBooks(): Promise<void> {
     for (const market of this.activeMarkets) {
+      // Calculate per-market exposure ratio for spread controller
+      let marketExposure = 0;
+      for (const token of market.tokens) {
+        const pos = this.stateMgr.getPosition(token.tokenId);
+        if (pos && pos.netShares > 0) {
+          marketExposure += pos.netShares * pos.avgEntry;
+        }
+      }
+      const exposureRatio = marketExposure / this.config.maxCapitalPerMarket;
+      this.spreadController.updateExposureRatio(market.conditionId, exposureRatio);
+
       for (const token of market.tokens) {
         try {
           const rawBook = await this.client.getOrderBook(token.tokenId);
@@ -371,6 +391,10 @@ export class MmEngine {
           this.books.set(token.tokenId, snapshot);
           this.priceMap.set(token.tokenId, snapshot.midpoint);
           this.risk.recordPrice(token.tokenId, snapshot.midpoint);
+
+          // Feed realized volatility to spread controller (v3)
+          const vol = this.risk.getRealizedVolatility(token.tokenId);
+          this.spreadController.updateVolatility(market.conditionId, vol);
         } catch (err: any) {
           this.logger.warn(
             `Failed to fetch book for ${token.tokenId.slice(0, 10)}: ${err.message}`,
@@ -407,8 +431,8 @@ export class MmEngine {
       order.side,
     );
 
-    // Record fill for adverse selection detection
-    this.risk.recordFill(order.conditionId);
+    // Record fill for adverse selection + toxic flow detection (v3: with direction data)
+    this.risk.recordFill(order.conditionId, order.tokenId, order.side, fillSize);
 
     const fillValue = (fillSize * order.price).toFixed(2);
     const emoji = order.side === "BUY" ? "🟢" : "🔴";
@@ -475,7 +499,22 @@ export class MmEngine {
           `Market removed: selling ${pos.outcome} ${pos.netShares.toFixed(1)} shares ` +
             `(${id.slice(0, 10)})`,
         );
-        await this.fillHandler.forceSellPublic(pos.tokenId, id, pos.netShares);
+        const ok = await this.fillHandler.forceSellPublic(pos.tokenId, id, pos.netShares);
+        if (!ok) {
+          // Track as pending sell for retry
+          this.stateMgr.setPendingSell(pos.tokenId, {
+            tokenId: pos.tokenId,
+            conditionId: id,
+            shares: pos.netShares,
+            placedAt: Date.now(),
+            retryCount: 0,
+            lastAttemptAt: Date.now(),
+            splitFactor: 1.0,
+          });
+          this.logger.warn(
+            `Failed to sell removed-market position ${pos.tokenId.slice(0, 10)}, tracked as pending sell`,
+          );
+        }
       }
     }
 
@@ -548,8 +587,18 @@ export class MmEngine {
         pos.netShares,
       );
       if (!ok) {
+        // Track as pending sell for retry (prevents orphan from being forgotten)
+        this.stateMgr.setPendingSell(pos.tokenId, {
+          tokenId: pos.tokenId,
+          conditionId: pos.conditionId,
+          shares: pos.netShares,
+          placedAt: Date.now(),
+          retryCount: 0,
+          lastAttemptAt: Date.now(),
+          splitFactor: 1.0,
+        });
         this.logger.warn(
-          `Failed to sell orphan ${pos.tokenId.slice(0, 10)}, will retry via pending sells`,
+          `Failed to sell orphan ${pos.tokenId.slice(0, 10)}, tracked as pending sell for retry`,
         );
       }
     }
