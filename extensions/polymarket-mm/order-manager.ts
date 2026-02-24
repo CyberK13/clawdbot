@@ -220,8 +220,8 @@ export class OrderManager {
 
   /**
    * Detect fills by comparing tracked orders with exchange state.
-   * When orders disappear, verify via getTrades() to distinguish real fills
-   * from external cancellations (prevents phantom position tracking).
+   * When orders disappear, verify via getTrades() first, then on-chain
+   * balance as fallback, to distinguish real fills from external cancellations.
    */
   async detectFills(): Promise<Array<{ order: TrackedOrder; fillSize: number }>> {
     const fills: Array<{ order: TrackedOrder; fillSize: number }> = [];
@@ -259,7 +259,8 @@ export class OrderManager {
             // Look for matching trade
             const matchingTrade = recentTrades.find(
               (t) =>
-                t.order_id === tracked.orderId ||
+                t.taker_order_id === tracked.orderId ||
+                t.maker_orders?.some((m) => m.order_id === tracked.orderId) ||
                 (t.asset_id === tracked.tokenId &&
                   t.side === tracked.side &&
                   Math.abs(parseFloat(t.price) - tracked.price) < 0.01 &&
@@ -267,7 +268,7 @@ export class OrderManager {
             );
 
             if (matchingTrade) {
-              // Confirmed fill
+              // Confirmed fill via trade history
               const confirmedSize = parseFloat(matchingTrade.size) || fillSize;
               fills.push({ order: tracked, fillSize: confirmedSize });
               tracked.status = "filled";
@@ -276,11 +277,52 @@ export class OrderManager {
                 `Verified fill via trade: ${tracked.side} ${confirmedSize.toFixed(1)} @ ${tracked.price.toFixed(3)}`,
               );
             } else {
-              // No matching trade — external cancel, not a fill
-              this.logger.info(
-                `Order ${tracked.orderId.slice(0, 10)} disappeared with no matching trade — treating as external cancel`,
-              );
-              tracked.status = "cancelled";
+              // No matching trade — check on-chain balance as fallback.
+              // getTrades() can miss fills due to pagination/time window limits.
+              // On-chain balance is the ground truth.
+              let confirmedByBalance = false;
+              try {
+                const onChainShares = await this.client.getConditionalBalance(tracked.tokenId);
+                if (onChainShares >= 0) {
+                  const existingPos = this.state.getPosition(tracked.tokenId);
+                  const trackedShares = existingPos?.netShares ?? 0;
+                  if (tracked.side === "BUY" && onChainShares > trackedShares + fillSize * 0.5) {
+                    // On-chain has more than tracked → BUY was filled
+                    confirmedByBalance = true;
+                    const actualFill = Math.min(fillSize, onChainShares - trackedShares);
+                    fills.push({ order: tracked, fillSize: actualFill });
+                    tracked.status = "filled";
+                    tracked.filledSize = tracked.originalSize;
+                    this.logger.info(
+                      `Verified fill via on-chain balance: ${tracked.side} ${actualFill.toFixed(1)} @ ${tracked.price.toFixed(3)} ` +
+                        `(on-chain=${onChainShares.toFixed(1)}, tracked=${trackedShares.toFixed(1)})`,
+                    );
+                  } else if (
+                    tracked.side === "SELL" &&
+                    onChainShares < trackedShares - fillSize * 0.5
+                  ) {
+                    // On-chain has less than tracked → SELL was filled
+                    confirmedByBalance = true;
+                    const actualFill = Math.min(fillSize, trackedShares - onChainShares);
+                    fills.push({ order: tracked, fillSize: actualFill });
+                    tracked.status = "filled";
+                    tracked.filledSize = tracked.originalSize;
+                    this.logger.info(
+                      `Verified fill via on-chain balance: ${tracked.side} ${actualFill.toFixed(1)} @ ${tracked.price.toFixed(3)} ` +
+                        `(on-chain=${onChainShares.toFixed(1)}, tracked=${trackedShares.toFixed(1)})`,
+                    );
+                  }
+                }
+              } catch {
+                // Balance check failed — will fall through to cancel
+              }
+
+              if (!confirmedByBalance) {
+                this.logger.info(
+                  `Order ${tracked.orderId.slice(0, 10)} disappeared with no matching trade or balance change — treating as external cancel`,
+                );
+                tracked.status = "cancelled";
+              }
             }
           } else if (fillSize > 0) {
             // getTrades() failed — assume fill for safety (old behavior)
