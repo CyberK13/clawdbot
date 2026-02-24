@@ -56,12 +56,21 @@ export class MarketScanner {
     this.logger.info(`Found ${rewards.length} reward entries`);
 
     // 2. Pre-sort by daily rate, filter minimum
+    // CRITICAL: require rewards_max_spread > 0 to confirm market has active reward config.
+    // Markets without reward config return 0/undefined — using defaults would
+    // let non-reward markets slip through and waste capital.
     const candidates = rewards
       .map((r) => ({
         ...r,
         dailyRate: (r as any).total_daily_rate || (r as any).native_daily_rate || 0,
       }))
-      .filter((r) => r.dailyRate >= this.config.minRewardRate && r.dailyRate > 0)
+      .filter(
+        (r) =>
+          r.dailyRate >= this.config.minRewardRate &&
+          r.dailyRate > 0 &&
+          r.rewards_max_spread > 0 &&
+          r.rewards_min_size > 0,
+      )
       .sort((a, b) => b.dailyRate - a.dailyRate)
       .slice(0, CANDIDATE_POOL_SIZE);
 
@@ -179,7 +188,12 @@ export class MarketScanner {
     }
 
     // rewards_max_spread is in CENTS → convert to price units
-    const maxSpreadCents = cand.rewards_max_spread || 5;
+    // Reject markets without explicit reward config (should be filtered earlier, belt-and-suspenders)
+    if (!cand.rewards_max_spread || cand.rewards_max_spread <= 0) {
+      this.logger.info(`Skipping ${cand.condition_id.slice(0, 16)}: no rewards_max_spread`);
+      return null;
+    }
+    const maxSpreadCents = cand.rewards_max_spread;
     const maxSpreadPrice = maxSpreadCents / 100; // 3.5 cents → 0.035
 
     // Fetch orderbook to assess competition
