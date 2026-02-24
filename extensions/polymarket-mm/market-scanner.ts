@@ -148,12 +148,16 @@ export class MarketScanner {
     }
 
     // Volume filter: skip low-volume markets (unreliable books, harder exits)
-    const volume24h = parseFloat(detail.volume_num_24hr || detail.volume || "0");
-    if (this.config.minDailyVolume > 0 && volume24h < this.config.minDailyVolume) {
-      this.logger.info(
-        `Skipping ${cand.condition_id.slice(0, 16)}: volume $${volume24h.toFixed(0)} < min $${this.config.minDailyVolume}`,
-      );
-      return null;
+    // Note: CLOB API may not return volume — only filter when data is available
+    const rawVolume = detail.volume_num_24hr ?? detail.volume;
+    if (rawVolume !== undefined && this.config.minDailyVolume > 0) {
+      const volume24h = parseFloat(rawVolume);
+      if (!isNaN(volume24h) && volume24h < this.config.minDailyVolume) {
+        this.logger.info(
+          `Skipping ${cand.condition_id.slice(0, 16)}: volume $${volume24h.toFixed(0)} < min $${this.config.minDailyVolume}`,
+        );
+        return null;
+      }
     }
 
     // Capital-aware filtering: calculate the minimum USDC needed to enter
