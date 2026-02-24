@@ -167,7 +167,9 @@ export class FillHandler {
       const delaySinceLastAttempt = now - ps.lastAttemptAt;
       const requiredDelay = ps.retryCount === 0 ? initialTimeout : retryDelay;
 
-      if (delaySinceLastAttempt < requiredDelay) continue;
+      // Protective phase handles its own timing (60s upgrade, immediate emergency)
+      // — don't gate it behind the force-sell retry delay
+      if (ps.phase !== "protective" && delaySinceLastAttempt < requiredDelay) continue;
 
       // Check current position
       const pos = this.state.getPosition(tokenId);
