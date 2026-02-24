@@ -70,6 +70,9 @@ export const DEFAULT_CONFIG: MmConfig = {
   forceSellMaxRetriesPerSplit: 3, // 3 retries per split level (faster than 5)
   forceSellMinSplitFactor: 0.1, // minimum 10% split (was implicit 25%)
   forceSellUrgentRetryDelayMs: 10_000, // 10s for critical urgency
+
+  // Protective sell
+  protectiveSellSpread: 0.005, // max -0.5% from entry for protective SELL
 };
 
 /** Merge user overrides onto defaults, validating ranges. */
@@ -124,6 +127,9 @@ export function resolveConfig(overrides?: Partial<MmConfig>): MmConfig {
   cfg.forceSellMaxRetriesPerSplit = clamp(cfg.forceSellMaxRetriesPerSplit, 1, 10);
   cfg.forceSellMinSplitFactor = clamp(cfg.forceSellMinSplitFactor, 0.05, 0.5);
   cfg.forceSellUrgentRetryDelayMs = Math.max(5_000, cfg.forceSellUrgentRetryDelayMs);
+
+  // Protective sell
+  cfg.protectiveSellSpread = clamp(cfg.protectiveSellSpread, 0.001, 0.05);
 
   return cfg;
 }

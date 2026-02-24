@@ -90,6 +90,10 @@ export interface MmConfig {
   forceSellMinSplitFactor: number;
   /** Retry delay for urgent/critical pending sells (ms) */
   forceSellUrgentRetryDelayMs: number;
+
+  // Protective sell
+  /** Max loss from entry price for protective SELL (e.g. 0.005 = -0.5%) */
+  protectiveSellSpread: number;
 }
 
 // ---- Market ----------------------------------------------------------------
@@ -288,6 +292,14 @@ export interface PendingSell {
   urgency?: "low" | "medium" | "high" | "critical";
   /** Whether the SELL order is within scoring spread (earning rewards) */
   isScoring?: boolean;
+  /** Current phase: "protective" (tight stop-loss) or "scoring" (wider profit-seeking) */
+  phase?: "protective" | "scoring";
+  /** Market tick size (stored for phase upgrade calculations) */
+  marketTickSize?: string;
+  /** Market rewards max spread (stored for phase upgrade calculations) */
+  marketMaxSpread?: number;
+  /** Market negRisk flag */
+  marketNegRisk?: boolean;
 }
 
 // ---- Toxicity analysis ---------------------------------------------------

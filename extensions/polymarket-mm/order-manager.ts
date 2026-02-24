@@ -78,22 +78,30 @@ export class OrderManager {
     }
   }
 
-  /** Place a single limit order. */
+  /** Place a single limit order. BUY uses GTD (auto-expire) for crash protection. */
   async placeOrder(market: MmMarket, target: TargetQuote): Promise<TrackedOrder | null> {
     try {
+      // BUY orders use GTD with 60s expiry — prevents stale buys during crashes
+      const isBuy = target.side === "BUY";
+      const orderType = isBuy ? OrderType.GTD : OrderType.GTC;
+      const expiration = isBuy
+        ? Math.floor(Date.now() / 1000) + 60 + 5 // 60s + 5s safety margin
+        : undefined;
+
       const result = await this.client.createAndPostOrder(
         {
           tokenID: target.tokenId,
           price: target.price,
           size: target.size,
-          side: target.side === "BUY" ? Side.BUY : Side.SELL,
+          side: isBuy ? Side.BUY : Side.SELL,
           feeRateBps: 0,
+          ...(expiration ? { expiration } : {}),
         },
         {
           tickSize: market.tickSize,
           negRisk: market.negRisk,
         },
-        OrderType.GTC,
+        orderType,
         true, // postOnly: critical for MM to avoid crossing spread
       );
 
@@ -148,18 +156,23 @@ export class OrderManager {
 
     for (const target of targets) {
       try {
+        const isBuy = target.side === "BUY";
+        const orderType = isBuy ? OrderType.GTD : OrderType.GTC;
+        const expiration = isBuy ? Math.floor(Date.now() / 1000) + 60 + 5 : undefined;
+
         const signedOrder = await this.client.createOrder(
           {
             tokenID: target.tokenId,
             price: target.price,
             size: target.size,
-            side: target.side === "BUY" ? Side.BUY : Side.SELL,
+            side: isBuy ? Side.BUY : Side.SELL,
             feeRateBps: 0,
+            ...(expiration ? { expiration } : {}),
           },
           { tickSize: market.tickSize, negRisk: market.negRisk },
         );
         batchArgs.push({
-          args: { order: signedOrder, orderType: OrderType.GTC, postOnly: true },
+          args: { order: signedOrder, orderType, postOnly: true },
           target,
         });
       } catch (err: any) {

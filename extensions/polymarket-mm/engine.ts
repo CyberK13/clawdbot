@@ -34,6 +34,7 @@ import type {
   PendingSell,
 } from "./types.js";
 import { sleep, todayUTC, fmtUsd } from "./utils.js";
+import { WsFeed } from "./ws-feed.js";
 
 export class MmEngine {
   private client: PolymarketClient;
@@ -47,6 +48,7 @@ export class MmEngine {
   private opportunistic: OpportunisticTrader;
   private spreadController: SpreadController;
   private fillHandler: FillHandler;
+  private wsFeed: WsFeed | null = null;
 
   private config: MmConfig;
   private logger: PluginLogger;
@@ -68,6 +70,8 @@ export class MmEngine {
   /** Track last midpoint correction per token to reduce log spam. */
   private lastMidCorrection: Map<string, number> = new Map();
 
+  private clientOpts: ClientOptions;
+
   constructor(
     clientOpts: ClientOptions,
     stateDir: string,
@@ -75,6 +79,7 @@ export class MmEngine {
     logger: PluginLogger,
   ) {
     this.logger = logger;
+    this.clientOpts = clientOpts;
     this.config = resolveConfig(configOverrides);
     this.client = new PolymarketClient(clientOpts);
     this.stateMgr = new StateManager(stateDir, logger);
@@ -177,6 +182,19 @@ export class MmEngine {
       this.startDashboard();
     }
 
+    // Start WebSocket feed for real-time fill detection
+    this.wsFeed = new WsFeed(
+      {
+        apiKey: this.clientOpts.apiKey,
+        apiSecret: this.clientOpts.apiSecret,
+        passphrase: this.clientOpts.passphrase,
+      },
+      this.stateMgr,
+      (order, fillSize) => this.handleFill(order, fillSize),
+      this.logger,
+    );
+    this.wsFeed.start(activeIds);
+
     // Start main loop
     this.scheduleLoop();
   }
@@ -190,6 +208,12 @@ export class MmEngine {
     }
 
     this.logger.info(`Stopping MM: ${reason}`);
+
+    // Stop WebSocket feed
+    if (this.wsFeed) {
+      this.wsFeed.stop();
+      this.wsFeed = null;
+    }
 
     // Cancel all orders
     await this.orderMgr.cancelAllOrders();
@@ -216,6 +240,12 @@ export class MmEngine {
 
     this.logger.error(`🚨 KILL SWITCH: ${reason}`);
 
+    // Stop WebSocket feed immediately
+    if (this.wsFeed) {
+      this.wsFeed.stop();
+      this.wsFeed = null;
+    }
+
     // Cancel all orders immediately
     try {
       await this.client.cancelAll();
@@ -223,15 +253,27 @@ export class MmEngine {
       // Best effort
     }
 
-    // Attempt to liquidate positions if configured
+    // Attempt to liquidate positions — retry up to 3 times with 5s delay
     let liquidated = false;
     if (this.config.liquidateOnKill) {
-      this.logger.info("Attempting liquidation on kill...");
-      try {
-        await this.liquidateAllPositions();
-        liquidated = true;
-      } catch (err: any) {
-        this.logger.error(`Liquidation on kill failed: ${err.message}`);
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        this.logger.info(`Kill switch liquidation attempt ${attempt}/3...`);
+        try {
+          const result = await this.liquidateAllPositions();
+          if (result.failed === 0) {
+            liquidated = true;
+            break;
+          }
+          // Some positions failed — retry after delay
+          this.logger.warn(
+            `Liquidation attempt ${attempt}: ${result.success} sold, ${result.failed} failed`,
+          );
+        } catch (err: any) {
+          this.logger.error(`Liquidation attempt ${attempt} failed: ${err.message}`);
+        }
+        if (attempt < 3) {
+          await new Promise((resolve) => setTimeout(resolve, 5_000));
+        }
       }
     }
 
@@ -630,6 +672,7 @@ export class MmEngine {
     this.activeMarkets = newMarkets;
     const newIds = newMarkets.map((m) => m.conditionId);
     this.fillHandler.setActiveMarkets(newIds);
+    this.wsFeed?.updateMarkets(newIds);
     this.stateMgr.update({
       activeMarkets: newIds,
       lastScanAt: Date.now(),
@@ -660,6 +703,8 @@ export class MmEngine {
         pos.tokenId,
         pos.conditionId,
         pos.netShares,
+        0,
+        true, // forceEmergency: bypass price floor on kill switch
       );
       if (ok) {
         success++;

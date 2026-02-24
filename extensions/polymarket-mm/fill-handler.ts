@@ -177,6 +177,134 @@ export class FillHandler {
         continue;
       }
 
+      // --- Phase upgrade logic for protective SELLs ---
+      if (ps.phase === "protective") {
+        const age = now - ps.placedAt;
+
+        // Emergency exit: high/critical urgency → cancel protective SELL → force FAK
+        if (urgency === "high" || urgency === "critical") {
+          this.logger.warn(
+            `⚠️ Emergency exit: ${tokenId.slice(0, 10)} urgency=${urgency}, cancelling protective SELL`,
+          );
+          if (ps.sellOrderId) {
+            try {
+              await this.client.cancelOrder(ps.sellOrderId);
+              this.state.removeOrder(ps.sellOrderId);
+            } catch {}
+            ps.sellOrderId = undefined;
+          }
+          // Force sell immediately with emergency flag
+          const sharesToSell = pos.netShares;
+          const result = await this.forceSell(tokenId, ps.conditionId, sharesToSell, 0, true);
+          if (result === "success" || result === "partial") {
+            const posAfter = this.state.getPosition(tokenId);
+            if (!posAfter || posAfter.netShares <= 0) {
+              this.state.removePendingSell(tokenId);
+            } else {
+              ps.shares = posAfter.netShares;
+              ps.lastAttemptAt = now;
+              this.state.setPendingSell(tokenId, ps);
+            }
+          } else {
+            ps.retryCount++;
+            ps.lastAttemptAt = now;
+            this.state.setPendingSell(tokenId, ps);
+          }
+          continue;
+        }
+
+        // Phase upgrade: after 60s stable → upgrade to scoring SELL (wider, profit-seeking)
+        if (age > 60_000 && urgency === "low" && ps.marketMaxSpread && ps.marketTickSize) {
+          const tick = parseFloat(ps.marketTickSize);
+          const decimals =
+            ps.marketTickSize === "0.001" ? 3 : ps.marketTickSize === "0.0001" ? 4 : 2;
+
+          // Get current midpoint
+          let currentMid: number | undefined;
+          try {
+            currentMid = await this.client.getMidpoint(tokenId);
+            if (currentMid! <= 0 || currentMid! >= 1) currentMid = undefined;
+          } catch {}
+
+          if (currentMid) {
+            // Scoring SELL at mid + defaultSpreadRatio × maxSpread
+            const scoringSpread = this.config.defaultSpreadRatio * ps.marketMaxSpread;
+            let scoringPrice = currentMid + scoringSpread;
+            scoringPrice = parseFloat((Math.ceil(scoringPrice / tick) * tick).toFixed(decimals));
+            scoringPrice = Math.min(scoringPrice, 1 - tick);
+
+            // Only upgrade if scoring price is higher (more profitable) than protective
+            const existingOrder = ps.sellOrderId
+              ? this.state.getTrackedOrders().find((o) => o.orderId === ps.sellOrderId)
+              : undefined;
+            const currentSellPrice = existingOrder?.price ?? 0;
+
+            if (scoringPrice > currentSellPrice && scoringPrice > 0) {
+              // Cancel old protective SELL
+              if (ps.sellOrderId) {
+                try {
+                  await this.client.cancelOrder(ps.sellOrderId);
+                  this.state.removeOrder(ps.sellOrderId);
+                } catch {}
+                ps.sellOrderId = undefined;
+              }
+
+              // Place new scoring SELL
+              try {
+                const result = await this.client.createAndPostOrder(
+                  {
+                    tokenID: tokenId,
+                    price: scoringPrice,
+                    size: pos.netShares,
+                    side: Side.SELL,
+                    feeRateBps: 0,
+                  },
+                  { tickSize: ps.marketTickSize as any, negRisk: ps.marketNegRisk ?? false },
+                  OrderType.GTC,
+                  true, // postOnly for scoring — we want it to rest on the book
+                );
+
+                const sellId = result?.orderID || result?.orderHashes?.[0];
+                if (sellId) {
+                  ps.sellOrderId = sellId;
+                  ps.phase = "scoring";
+                  ps.isScoring = scoringSpread <= ps.marketMaxSpread;
+                  ps.lastAttemptAt = now;
+                  this.state.setPendingSell(tokenId, ps);
+
+                  this.state.trackOrder({
+                    orderId: sellId,
+                    tokenId,
+                    conditionId: ps.conditionId,
+                    side: "SELL",
+                    price: scoringPrice,
+                    originalSize: pos.netShares,
+                    filledSize: 0,
+                    status: "live",
+                    scoring: ps.isScoring ?? false,
+                    placedAt: now,
+                    level: 0,
+                  });
+
+                  this.logger.info(
+                    `📈 Phase upgrade: ${tokenId.slice(0, 10)} protective→scoring ` +
+                      `SELL ${pos.netShares.toFixed(1)} @ ${scoringPrice.toFixed(4)} ` +
+                      `(mid=${currentMid.toFixed(4)}, spread=${(scoringSpread * 100).toFixed(2)}c)`,
+                  );
+                }
+              } catch (err: any) {
+                this.logger.warn(`Failed to place scoring SELL: ${err.message}`);
+                // Keep protective phase, will retry next cycle
+              }
+              continue;
+            }
+          }
+        }
+
+        // Protective phase, not yet 60s or price not favorable — skip normal timeout logic
+        if (ps.sellOrderId) continue;
+      }
+
       // Reward-aware hold: if scoring + low urgency, check if rewards outweigh risk
       if (ps.isScoring && urgency === "low" && ps.retryCount === 0) {
         const shouldHold = await this.shouldHoldForRewards(tokenId, ps);
@@ -283,8 +411,15 @@ export class FillHandler {
     conditionId: string,
     shares: number,
     pendingSellAge = 0,
+    forceEmergency = false,
   ): Promise<boolean> {
-    const result = await this.forceSell(tokenId, conditionId, shares, pendingSellAge);
+    const result = await this.forceSell(
+      tokenId,
+      conditionId,
+      shares,
+      pendingSellAge,
+      forceEmergency,
+    );
     return result === "success" || result === "partial";
   }
 
@@ -447,7 +582,7 @@ export class FillHandler {
       `Low exposure fill recovery: ${order.tokenId.slice(0, 10)} ${fillSize.toFixed(1)} shares`,
     );
 
-    // Get current midpoint for urgency tracking
+    // Get current midpoint
     let fillMidpoint: number | undefined;
     try {
       fillMidpoint = await this.client.getMidpoint(order.tokenId);
@@ -456,18 +591,40 @@ export class FillHandler {
       // non-critical
     }
 
-    // Track pending sell with timeout — persisted to state
-    // Merge with existing PendingSell if one exists (concurrent fills on same token)
+    const mid = fillMidpoint ?? order.price;
+    const tick = parseFloat(market.tickSize);
+    const decimals = market.tickSize === "0.001" ? 3 : market.tickSize === "0.0001" ? 4 : 2;
+
+    // Phase 1: Place PROTECTIVE SELL — tight spread, high scoring weight, capital protection
+    // Price = max(entry × 0.995, mid + 1tick) — ensures it rests above mid
+    const entryFloor = order.price * (1 - this.config.protectiveSellSpread);
+    let protectivePrice = Math.max(entryFloor, mid + tick);
+    protectivePrice = parseFloat((Math.ceil(protectivePrice / tick) * tick).toFixed(decimals));
+    protectivePrice = Math.min(protectivePrice, 1 - tick);
+
+    if (protectivePrice <= 0 || protectivePrice >= 1) {
+      // Can't place protective order — fallback to immediate FAK sell
+      this.logger.warn(`Protective price invalid (${protectivePrice}), falling back to FAK sell`);
+      await this.forceSell(order.tokenId, order.conditionId, fillSize);
+      return;
+    }
+
+    const spreadFromMid = protectivePrice - mid;
+    const isInScoringRange = spreadFromMid > 0 && spreadFromMid <= market.rewardsMaxSpread;
+
+    // Track pending sell BEFORE placing order (so checkTimeouts can upgrade later)
     const now = Date.now();
     const existingPs = this.state.getPendingSells()[order.tokenId];
     if (existingPs) {
-      // Merge: accumulate shares, keep existing sellOrderId and tracking
-      existingPs.shares += fillSize;
-      existingPs.fillMidpoint = fillMidpoint ?? existingPs.fillMidpoint;
+      existingPs.shares = fillSize;
+      existingPs.fillMidpoint = fillMidpoint;
+      existingPs.urgency = "low";
+      existingPs.isScoring = isInScoringRange;
+      existingPs.phase = "protective";
+      existingPs.marketTickSize = market.tickSize;
+      existingPs.marketMaxSpread = market.rewardsMaxSpread;
+      existingPs.marketNegRisk = market.negRisk;
       this.state.setPendingSell(order.tokenId, existingPs);
-      this.logger.info(
-        `Merged pending sell ${order.tokenId.slice(0, 10)}: +${fillSize.toFixed(1)} → ${existingPs.shares.toFixed(1)} total`,
-      );
     } else {
       this.state.setPendingSell(order.tokenId, {
         tokenId: order.tokenId,
@@ -479,45 +636,27 @@ export class FillHandler {
         splitFactor: 1.0,
         fillMidpoint,
         urgency: "low",
-        isScoring: false, // will be set to true if SELL lands in scoring range
+        isScoring: isInScoringRange,
+        phase: "protective",
+        marketTickSize: market.tickSize,
+        marketMaxSpread: market.rewardsMaxSpread,
+        marketNegRisk: market.negRisk,
       });
     }
 
-    // Place a SELL limit at midpoint + spread for extra scoring
+    // Place protective SELL — NOT postOnly (we WANT it to cross if bestBid > protectivePrice)
     try {
-      const mid = fillMidpoint ?? (await this.client.getMidpoint(order.tokenId));
-      if (mid <= 0 || mid >= 1) return;
-
-      const tick = parseFloat(market.tickSize);
-      const spread = this.spreadController.calculateSpread(
-        market.rewardsMaxSpread,
-        market.conditionId,
-        tick,
-        market.negRisk,
-        mid,
-      );
-      let askPrice = mid + spread;
-      // Round up to tick grid
-      const decimals = market.tickSize === "0.001" ? 3 : market.tickSize === "0.0001" ? 4 : 2;
-      askPrice = parseFloat((Math.ceil(askPrice / tick) * tick).toFixed(decimals));
-      askPrice = Math.min(askPrice, 1 - tick);
-
-      if (askPrice <= mid || askPrice >= 1) return;
-
-      // Check if SELL would be within scoring range
-      const isInScoringRange = askPrice - mid <= market.rewardsMaxSpread;
-
       const result = await this.client.createAndPostOrder(
         {
           tokenID: order.tokenId,
-          price: askPrice,
+          price: protectivePrice,
           size: fillSize,
           side: Side.SELL,
           feeRateBps: 0,
         },
         { tickSize: market.tickSize, negRisk: market.negRisk },
         OrderType.GTC,
-        true, // postOnly
+        false, // NOT postOnly — allow immediate fill for protection
       );
 
       const sellId = result?.orderID || result?.orderHashes?.[0];
@@ -525,7 +664,6 @@ export class FillHandler {
         const ps = this.state.getPendingSells()[order.tokenId];
         if (ps) {
           ps.sellOrderId = sellId;
-          ps.isScoring = isInScoringRange;
           this.state.setPendingSell(order.tokenId, ps);
         }
 
@@ -534,18 +672,19 @@ export class FillHandler {
           tokenId: order.tokenId,
           conditionId: order.conditionId,
           side: "SELL",
-          price: askPrice,
+          price: protectivePrice,
           originalSize: fillSize,
           filledSize: 0,
           status: "live",
           scoring: isInScoringRange,
-          placedAt: Date.now(),
+          placedAt: now,
           level: 0,
         });
 
         this.logger.info(
-          `Placed recovery SELL: ${fillSize.toFixed(1)} @ ${askPrice.toFixed(3)} ` +
-            `(scoring=${isInScoringRange})`,
+          `🛡️ Protective SELL: ${fillSize.toFixed(1)} @ ${protectivePrice.toFixed(4)} ` +
+            `(entry=${order.price.toFixed(4)}, mid=${mid.toFixed(4)}, spread=${(spreadFromMid * 100).toFixed(2)}c, ` +
+            `scoring=${isInScoringRange})`,
         );
       }
     } catch (err: any) {
@@ -566,10 +705,10 @@ export class FillHandler {
     // Widen spread
     this.spreadController.widenSpread(order.conditionId, 1.5);
 
-    // FOK sell half the filled amount — only from the token that was just filled
+    // Sell ALL shares — medium exposure means we need to reduce, not hold
     const pos = this.state.getPosition(order.tokenId);
     const available = pos ? Math.max(0, pos.netShares) : 0;
-    const sellShares = Math.min(fillSize * 0.5, available);
+    const sellShares = available;
     if (sellShares > 0) {
       const result = await this.forceSell(order.tokenId, order.conditionId, sellShares);
       if (result !== "success") {
@@ -665,6 +804,7 @@ export class FillHandler {
     conditionId: string,
     shares: number,
     pendingSellAge = 0,
+    forceEmergency = false,
   ): Promise<
     "success" | "partial" | "no_bids" | "below_min_price" | "insufficient_liquidity" | "error"
   > {
@@ -682,32 +822,29 @@ export class FillHandler {
         return "no_bids";
       }
 
-      // Price floor gate: don't submit if market price is unacceptable
+      // Emergency mode: kill switch or aged pending sell bypass all floors
+      const emergency = forceEmergency || pendingSellAge > this.config.maxPendingSellAgeMs;
+
+      // In emergency, sell at any price. Otherwise use entry-based floor.
       const pos = this.state.getPosition(tokenId);
       const avgEntry = pos?.avgEntry ?? 0;
-      const emergency = pendingSellAge > this.config.maxPendingSellAgeMs;
-
       const entryFloor = avgEntry * this.config.minSellPriceRatio;
-      const minPrice = emergency ? 0.01 : entryFloor;
+      const sellPrice = emergency ? Math.max(0.01, bestBid) : Math.max(0.01, entryFloor);
 
-      if (bestBid < minPrice && minPrice > 0.01) {
+      if (!emergency && bestBid < entryFloor && entryFloor > 0.01) {
         this.logger.warn(
           `Force sell ${tokenId.slice(0, 10)}: bestBid ${bestBid.toFixed(3)} below floor ` +
-            `${minPrice.toFixed(3)} (entry=${avgEntry.toFixed(3)}×${this.config.minSellPriceRatio}, ` +
-            `age=${(pendingSellAge / 1000).toFixed(0)}s, emergency=${emergency})`,
+            `${entryFloor.toFixed(3)} (entry=${avgEntry.toFixed(3)}×${this.config.minSellPriceRatio})`,
         );
         return "below_min_price";
       }
 
-      if (emergency && bestBid < entryFloor) {
+      if (emergency) {
         this.logger.warn(
-          `EMERGENCY sell ${tokenId.slice(0, 10)}: selling at ${bestBid.toFixed(3)} (below normal floor) ` +
-            `after ${(pendingSellAge / 60_000).toFixed(1)}min stuck`,
+          `EMERGENCY sell ${tokenId.slice(0, 10)}: selling at bestBid=${bestBid.toFixed(3)} ` +
+            `(floor bypassed, forceEmergency=${forceEmergency})`,
         );
       }
-
-      // Market sell: FAK at floor price sweeps all bids down to floor
-      const sellPrice = Math.max(0.01, minPrice);
       const tickSize = (book.tick_size || "0.01") as import("@polymarket/clob-client").TickSize;
       const negRisk = book.neg_risk || false;
       const sharesBefore = pos?.netShares ?? shares;
