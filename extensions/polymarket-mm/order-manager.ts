@@ -125,6 +125,14 @@ export class OrderManager {
         this.logger.info(
           `PostOnly rejected: ${target.side} ${target.size.toFixed(1)} @ ${target.price} (would cross spread)`,
         );
+      } else if (
+        err.message?.includes("not enough balance") ||
+        err.message?.includes("not enough allowance")
+      ) {
+        this.logger.info(
+          `Insufficient balance: ${target.side} ${target.size.toFixed(1)} @ ${target.price} ` +
+            `(~$${(target.size * target.price).toFixed(0)} needed)`,
+        );
       } else {
         this.logger.error(
           `Failed to place order ${target.side} ${target.size.toFixed(1)} @ ${target.price}: ${err.message}`,

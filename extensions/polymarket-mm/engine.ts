@@ -65,6 +65,8 @@ export class MmEngine {
   private activeMarkets: MmMarket[] = [];
   /** Cached balance. */
   private cachedBalance = 0;
+  /** Track last midpoint correction per token to reduce log spam. */
+  private lastMidCorrection: Map<string, number> = new Map();
 
   constructor(
     clientOpts: ClientOptions,
@@ -115,10 +117,30 @@ export class MmEngine {
     this.stateMgr.startAutoSave();
     await this.inventory.reconcile();
 
-    // Get initial balance
+    // Get initial balance and adjust capital config to match actual funds
     this.cachedBalance = await this.client.getBalance();
     this.stateMgr.update({ capital: this.cachedBalance });
     this.logger.info(`Balance: $${this.cachedBalance.toFixed(2)}`);
+
+    if (this.cachedBalance < this.config.totalCapital) {
+      this.config.totalCapital = this.cachedBalance;
+      this.config.maxCapitalPerMarket = Math.min(
+        this.config.maxCapitalPerMarket,
+        this.cachedBalance * 0.95,
+      );
+      this.config.orderSize = Math.min(
+        this.config.orderSize,
+        this.cachedBalance * 0.45, // ~half per token (YES+NO)
+      );
+      this.config.maxTotalExposure = Math.min(
+        this.config.maxTotalExposure,
+        this.cachedBalance * 0.95,
+      );
+      this.logger.info(
+        `Capital adjusted to balance: orderSize=$${this.config.orderSize.toFixed(0)}, ` +
+          `maxPerMarket=$${this.config.maxCapitalPerMarket.toFixed(0)}`,
+      );
+    }
 
     // Initial market scan
     await this.scanner.scan();
@@ -424,11 +446,17 @@ export class MmEngine {
       }
 
       if (trueMid > 0 && trueMid < 1) {
-        if (Math.abs(snapshot.midpoint - trueMid) > 0.05) {
+        // Only log midpoint correction when it's new or significantly changed
+        const lastCorr = this.lastMidCorrection.get(tokenId);
+        if (
+          Math.abs(snapshot.midpoint - trueMid) > 0.05 &&
+          (lastCorr === undefined || Math.abs(lastCorr - trueMid) > 0.01)
+        ) {
           this.logger.info(
             `Midpoint correction ${tokenId.slice(0, 10)}: ` +
               `local=${snapshot.midpoint.toFixed(3)} → true=${trueMid.toFixed(3)}`,
           );
+          this.lastMidCorrection.set(tokenId, trueMid);
         }
         snapshot.midpoint = trueMid;
       }
@@ -453,11 +481,16 @@ export class MmEngine {
           try {
             const trueMid = await this.client.getMidpoint(token.tokenId);
             if (trueMid > 0 && trueMid < 1) {
-              if (Math.abs(snapshot.midpoint - trueMid) > 0.05) {
+              const lastCorr = this.lastMidCorrection.get(token.tokenId);
+              if (
+                Math.abs(snapshot.midpoint - trueMid) > 0.05 &&
+                (lastCorr === undefined || Math.abs(lastCorr - trueMid) > 0.01)
+              ) {
                 this.logger.info(
                   `Midpoint correction ${token.tokenId.slice(0, 10)}: ` +
                     `local=${snapshot.midpoint.toFixed(3)} → true=${trueMid.toFixed(3)}`,
                 );
+                this.lastMidCorrection.set(token.tokenId, trueMid);
               }
               snapshot.midpoint = trueMid;
             }
