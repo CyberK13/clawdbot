@@ -723,12 +723,12 @@ export class FillHandler {
           feeRateBps: 0,
         },
         { tickSize, negRisk },
-        OrderType.FOK,
+        OrderType.FAK,
         false, // NOT postOnly — we want to cross the spread
       );
 
       this.logger.info(
-        `Force SELL: ${actualShares.toFixed(1)} shares of ${tokenId.slice(0, 10)} @ ${sellPrice} (FOK, bestBid=${bestBid.toFixed(3)})`,
+        `Force SELL: ${actualShares.toFixed(1)} shares of ${tokenId.slice(0, 10)} @ ${sellPrice} (FAK, bestBid=${bestBid.toFixed(3)})`,
       );
 
       // Update position tracking

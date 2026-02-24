@@ -2,7 +2,7 @@
 // Order Manager: Order lifecycle — place, cancel, refresh, track fills
 // ---------------------------------------------------------------------------
 
-import type { TickSize } from "@polymarket/clob-client";
+import type { TickSize, PostOrdersArgs } from "@polymarket/clob-client";
 import { OrderType, Side } from "@polymarket/clob-client";
 import type { PluginLogger } from "../../src/plugins/types.js";
 import type { PolymarketClient } from "./client.js";
@@ -67,10 +67,14 @@ export class OrderManager {
       }
     }
 
-    // Place new orders for unmatched targets
+    // Place new orders for unmatched targets — batch when possible
     const toPlace = targets.filter((_, idx) => !matched.has(`${idx}`));
-    for (const target of toPlace) {
-      await this.placeOrder(market, target);
+    if (toPlace.length > 1) {
+      await this.placeOrdersBatch(market, toPlace);
+    } else {
+      for (const target of toPlace) {
+        await this.placeOrder(market, target);
+      }
     }
   }
 
@@ -127,6 +131,79 @@ export class OrderManager {
         );
       }
       return null;
+    }
+  }
+
+  /** Batch-sign and post multiple orders at once (max 15 per request). */
+  private async placeOrdersBatch(market: MmMarket, targets: TargetQuote[]): Promise<void> {
+    const batchArgs: { args: PostOrdersArgs; target: TargetQuote }[] = [];
+
+    for (const target of targets) {
+      try {
+        const signedOrder = await this.client.createOrder(
+          {
+            tokenID: target.tokenId,
+            price: target.price,
+            size: target.size,
+            side: target.side === "BUY" ? Side.BUY : Side.SELL,
+            feeRateBps: 0,
+          },
+          { tickSize: market.tickSize, negRisk: market.negRisk },
+        );
+        batchArgs.push({
+          args: { order: signedOrder, orderType: OrderType.GTC, postOnly: true },
+          target,
+        });
+      } catch (err: any) {
+        this.logger.warn(
+          `Failed to sign order ${target.side} ${target.size.toFixed(1)} @ ${target.price}: ${err.message}`,
+        );
+      }
+    }
+
+    if (batchArgs.length === 0) return;
+
+    const BATCH_SIZE = 15;
+    for (let i = 0; i < batchArgs.length; i += BATCH_SIZE) {
+      const chunk = batchArgs.slice(i, i + BATCH_SIZE);
+      try {
+        const result = await this.client.postOrders(
+          chunk.map((c) => c.args),
+          true,
+        );
+
+        // Parse order IDs from response and track
+        const orderIds: string[] = result?.orderIDs || result?.orderHashes || [];
+        for (let j = 0; j < chunk.length; j++) {
+          const orderId = orderIds[j];
+          if (!orderId) continue;
+
+          const { target } = chunk[j];
+          this.state.trackOrder({
+            orderId,
+            tokenId: target.tokenId,
+            conditionId: market.conditionId,
+            side: target.side,
+            price: target.price,
+            originalSize: target.size,
+            filledSize: 0,
+            status: "live",
+            scoring: false,
+            placedAt: Date.now(),
+            level: target.level,
+          });
+        }
+
+        this.logger.info(
+          `Batch placed ${orderIds.length}/${chunk.length} orders on ${market.question.slice(0, 30)}`,
+        );
+      } catch (err: any) {
+        // Fallback: place individually
+        this.logger.warn(`Batch post failed, falling back to individual: ${err.message}`);
+        for (const { target } of chunk) {
+          await this.placeOrder(market, target);
+        }
+      }
     }
   }
 

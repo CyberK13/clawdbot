@@ -10,6 +10,7 @@
 //   6. Opportunistic trade check (every 30s)
 // ---------------------------------------------------------------------------
 
+import { Side } from "@polymarket/clob-client";
 import type { PluginLogger } from "../../src/plugins/types.js";
 import { PolymarketClient, type ClientOptions } from "./client.js";
 import { resolveConfig } from "./config.js";
@@ -351,28 +352,87 @@ export class MmEngine {
   // ---- Core operations ----------------------------------------------------
 
   private async refreshBooks(): Promise<void> {
+    // 1. Collect all tokens and update exposure ratios
+    const allTokens: { tokenId: string; market: MmMarket }[] = [];
     for (const market of this.activeMarkets) {
-      // Calculate per-market exposure ratio for spread controller
       let marketExposure = 0;
       for (const token of market.tokens) {
         const pos = this.stateMgr.getPosition(token.tokenId);
         if (pos && pos.netShares > 0) {
           marketExposure += pos.netShares * pos.avgEntry;
         }
+        allTokens.push({ tokenId: token.tokenId, market });
       }
       const exposureRatio = marketExposure / this.config.maxCapitalPerMarket;
       this.spreadController.updateExposureRatio(market.conditionId, exposureRatio);
+    }
 
+    if (allTokens.length === 0) return;
+
+    // 2. Batch fetch all orderbooks (1 API call instead of N)
+    const bookParams = allTokens.map((t) => ({ token_id: t.tokenId, side: Side.BUY }));
+    let rawBooks: import("@polymarket/clob-client").OrderBookSummary[];
+    try {
+      rawBooks = await this.client.getOrderBooks(bookParams);
+    } catch (err: any) {
+      this.logger.warn(`Batch book fetch failed, falling back to individual: ${err.message}`);
+      await this.refreshBooksIndividual();
+      return;
+    }
+
+    // 3. Batch fetch all midpoints (1 API call instead of N)
+    let midpoints: any = {};
+    try {
+      midpoints = await this.client.getMidpoints(bookParams);
+    } catch {
+      // Will use local book midpoints as fallback
+    }
+
+    // 4. Process results
+    for (let i = 0; i < allTokens.length; i++) {
+      const { tokenId, market } = allTokens[i];
+      const rawBook = rawBooks[i];
+      if (!rawBook) continue;
+
+      const snapshot = this.quoteEngine.parseBook(rawBook);
+
+      // Apply true midpoint from batch result
+      // getMidpoints may return array of {mid: string} or Record<token_id, string>
+      let trueMid = 0;
+      if (Array.isArray(midpoints)) {
+        const entry = midpoints[i];
+        trueMid = parseFloat(entry?.mid ?? entry ?? "0");
+      } else if (midpoints[tokenId]) {
+        trueMid = parseFloat(midpoints[tokenId]?.mid ?? midpoints[tokenId] ?? "0");
+      }
+
+      if (trueMid > 0 && trueMid < 1) {
+        if (Math.abs(snapshot.midpoint - trueMid) > 0.05) {
+          this.logger.info(
+            `Midpoint correction ${tokenId.slice(0, 10)}: ` +
+              `local=${snapshot.midpoint.toFixed(3)} → true=${trueMid.toFixed(3)}`,
+          );
+        }
+        snapshot.midpoint = trueMid;
+      }
+
+      this.books.set(tokenId, snapshot);
+      this.priceMap.set(tokenId, snapshot.midpoint);
+      this.risk.recordPrice(tokenId, snapshot.midpoint);
+
+      const vol = this.risk.getRealizedVolatility(tokenId);
+      this.spreadController.updateVolatility(market.conditionId, vol);
+    }
+  }
+
+  /** Fallback: fetch books individually (used when batch endpoint fails). */
+  private async refreshBooksIndividual(): Promise<void> {
+    for (const market of this.activeMarkets) {
       for (const token of market.tokens) {
         try {
           const rawBook = await this.client.getOrderBook(token.tokenId);
           const snapshot = this.quoteEngine.parseBook(rawBook);
 
-          // Always use getMidpoint API for accurate midpoint. The local
-          // orderbook can be extremely sparse (bid≈0.01, ask≈0.99) for
-          // thin or negRisk markets, giving a wildly wrong midpoint of ~0.50
-          // when the real price might be 0.21. getMidpoint accounts for all
-          // complement orders and market state.
           try {
             const trueMid = await this.client.getMidpoint(token.tokenId);
             if (trueMid > 0 && trueMid < 1) {
@@ -385,14 +445,13 @@ export class MmEngine {
               snapshot.midpoint = trueMid;
             }
           } catch {
-            // Fall back to local book midpoint if getMidpoint fails
+            // Fall back to local book midpoint
           }
 
           this.books.set(token.tokenId, snapshot);
           this.priceMap.set(token.tokenId, snapshot.midpoint);
           this.risk.recordPrice(token.tokenId, snapshot.midpoint);
 
-          // Feed realized volatility to spread controller (v3)
           const vol = this.risk.getRealizedVolatility(token.tokenId);
           this.spreadController.updateVolatility(market.conditionId, vol);
         } catch (err: any) {

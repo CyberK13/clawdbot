@@ -18,6 +18,7 @@ import type {
   CreateOrderOptions,
   OrderType as OT,
   PostOrdersArgs,
+  BookParams,
 } from "@polymarket/clob-client";
 import { ClobClient, Chain } from "@polymarket/clob-client";
 import { OrderType, Side } from "@polymarket/clob-client";
@@ -59,9 +60,9 @@ export class PolymarketClient {
 
   constructor(private opts: ClientOptions) {
     this.logger = opts.logger;
-    // CLOB API: 9000 req/10s general, but trading is more restrictive.
-    // Use conservative 8 req/s to leave headroom.
-    this.rateLimit = createRateLimiter(8);
+    // CLOB API: 9000 req/10s general, 3500 req/10s POST order.
+    // With batch endpoints reducing call volume, 25 req/s is safe.
+    this.rateLimit = createRateLimiter(25);
   }
 
   async init(): Promise<void> {
@@ -119,6 +120,18 @@ export class PolymarketClient {
     await this.rateLimit();
     const raw = await this.wrap(() => this.client.getMidpoint(tokenId));
     return parseFloat(raw?.mid ?? raw ?? "0.5");
+  }
+
+  async getOrderBooks(params: BookParams[]): Promise<OrderBookSummary[]> {
+    if (params.length === 0) return [];
+    await this.rateLimit();
+    return this.wrap(() => this.client.getOrderBooks(params));
+  }
+
+  async getMidpoints(params: BookParams[]): Promise<any> {
+    if (params.length === 0) return {};
+    await this.rateLimit();
+    return this.wrap(() => this.client.getMidpoints(params));
   }
 
   async getTickSize(tokenId: string): Promise<TickSize> {
