@@ -297,10 +297,14 @@ export class MmEngine {
         await this.opportunistic.checkOpportunities(this.activeMarkets, this.books);
       }
 
-      // --- Every 12 ticks (60s): reward scoring + fill timeout + spread decay ---
+      // --- Every 4 ticks (20s): pending sell timeout check ---
+      if (this.tickCount % 4 === 0) {
+        await this.fillHandler.checkTimeouts();
+      }
+
+      // --- Every 12 ticks (60s): reward scoring + spread decay ---
       if (this.tickCount % 12 === 0) {
         await this.rewards.checkScoring();
-        await this.fillHandler.checkTimeouts();
         this.spreadController.decayOverride();
       }
 

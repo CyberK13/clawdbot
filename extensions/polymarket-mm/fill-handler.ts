@@ -1,27 +1,26 @@
 // ---------------------------------------------------------------------------
-// Fill Handler: Capital recovery after order fills — v3 Smart Exit
+// Fill Handler: Capital recovery after order fills — v4 Market Exit
 //
 // When a BUY order gets filled, we accumulate inventory (position).
 // This handler ensures capital gets recycled:
 //
-// 1. Low exposure (<30% capital):
+// 1. Low exposure (<40% capital):
 //    - Place SELL limit at mid + spread (scoring + recovery)
-//    - Urgency-based timeout for FOK (5s→5min based on price movement)
+//    - Urgency-based timeout (10s→5min based on price movement)
 //
-// 2. Medium exposure (30-50%):
+// 2. Medium exposure (40-70%):
 //    - Widen spread 50%
-//    - FOK sell half positions
+//    - Market sell half positions
 //
-// 3. High exposure (>50%):
-//    - Cancel all orders
-//    - FOK sell all positions
+// 3. High exposure (>70%):
+//    - Cancel all market orders (prevent new fills)
+//    - Market sell all positions
 //
-// v3 improvements:
-//   - Urgency grading: low/medium/high/critical based on price movement
-//   - Reward-aware exit: hold scoring SELLs longer if profitable
-//   - Fast split progression: 3 retries/level, 10s urgent retry, min 10% split
-//   - Better price protection: max(entry×0.5, currentMid×0.85)
-//   - Toxic flow integration: high urgency on detected toxic flow
+// v4 improvements over v3:
+//   - FAK market exit: partial fills tracked via balance query
+//   - High exposure: cancel BUY orders before liquidation
+//   - PendingSell merge: concurrent fills don't orphan SELL orders
+//   - Faster timeout check: every 20s instead of 60s
 // ---------------------------------------------------------------------------
 
 import { OrderType, Side } from "@polymarket/clob-client";
@@ -216,7 +215,7 @@ export class FillHandler {
 
       const result = await this.forceSell(tokenId, ps.conditionId, sharesToSell, pendingSellAge);
 
-      if (result === "success") {
+      if (result === "success" || result === "partial") {
         // Check if full position is now gone
         const posAfter = this.state.getPosition(tokenId);
         if (!posAfter || posAfter.netShares <= 0) {
@@ -224,7 +223,7 @@ export class FillHandler {
         } else {
           // Update pending sell for remaining shares
           ps.shares = posAfter.netShares;
-          ps.retryCount = 0;
+          ps.retryCount = result === "partial" ? ps.retryCount : 0;
           ps.lastAttemptAt = now;
           this.state.setPendingSell(tokenId, ps);
         }
@@ -286,7 +285,7 @@ export class FillHandler {
     pendingSellAge = 0,
   ): Promise<boolean> {
     const result = await this.forceSell(tokenId, conditionId, shares, pendingSellAge);
-    return result === "success";
+    return result === "success" || result === "partial";
   }
 
   // ---- Internal -----------------------------------------------------------
@@ -458,19 +457,31 @@ export class FillHandler {
     }
 
     // Track pending sell with timeout — persisted to state
+    // Merge with existing PendingSell if one exists (concurrent fills on same token)
     const now = Date.now();
-    this.state.setPendingSell(order.tokenId, {
-      tokenId: order.tokenId,
-      conditionId: order.conditionId,
-      shares: fillSize,
-      placedAt: now,
-      retryCount: 0,
-      lastAttemptAt: now,
-      splitFactor: 1.0,
-      fillMidpoint,
-      urgency: "low",
-      isScoring: false, // will be set to true if SELL lands in scoring range
-    });
+    const existingPs = this.state.getPendingSells()[order.tokenId];
+    if (existingPs) {
+      // Merge: accumulate shares, keep existing sellOrderId and tracking
+      existingPs.shares += fillSize;
+      existingPs.fillMidpoint = fillMidpoint ?? existingPs.fillMidpoint;
+      this.state.setPendingSell(order.tokenId, existingPs);
+      this.logger.info(
+        `Merged pending sell ${order.tokenId.slice(0, 10)}: +${fillSize.toFixed(1)} → ${existingPs.shares.toFixed(1)} total`,
+      );
+    } else {
+      this.state.setPendingSell(order.tokenId, {
+        tokenId: order.tokenId,
+        conditionId: order.conditionId,
+        shares: fillSize,
+        placedAt: now,
+        retryCount: 0,
+        lastAttemptAt: now,
+        splitFactor: 1.0,
+        fillMidpoint,
+        urgency: "low",
+        isScoring: false, // will be set to true if SELL lands in scoring range
+      });
+    }
 
     // Place a SELL limit at midpoint + spread for extra scoring
     try {
@@ -594,6 +605,21 @@ export class FillHandler {
       `HIGH exposure! Liquidating positions for market ${market.conditionId.slice(0, 10)}`,
     );
 
+    // Cancel all orders for this market first to prevent new BUY fills during liquidation
+    try {
+      await this.client.cancelMarketOrders(market.conditionId);
+      // Clean up tracked orders
+      const tracked = this.state.getMarketOrders(market.conditionId);
+      for (const o of tracked) {
+        this.state.removeOrder(o.orderId);
+      }
+      this.logger.info(
+        `Cancelled all orders for ${market.conditionId.slice(0, 10)} before liquidation`,
+      );
+    } catch (err: any) {
+      this.logger.warn(`Failed to cancel orders before liquidation: ${err.message}`);
+    }
+
     // Only sell positions in THIS active market — not all positions globally
     for (const token of market.tokens) {
       const pos = this.state.getPosition(token.tokenId);
@@ -627,21 +653,21 @@ export class FillHandler {
   }
 
   /**
-   * FOK market sell with improved price protection.
+   * Market sell via FAK with price floor gate and partial fill tracking.
    *
-   * v3 improvements:
-   *   - minPrice = max(avgEntry × minSellPriceRatio, currentMid × 0.85)
-   *   - Use bestBid as sell price (not minPrice) for best execution
-   *   - Emergency mode still available for old pending sells
+   * Strategy: check bestBid against floor → submit FAK at floor price →
+   * query actual balance to determine real fill amount.
    *
-   * Returns: "success" | "no_bids" | "below_min_price" | "insufficient_liquidity" | "error"
+   * Returns: "success" | "partial" | "no_bids" | "below_min_price" | "insufficient_liquidity" | "error"
    */
   private async forceSell(
     tokenId: string,
     conditionId: string,
     shares: number,
     pendingSellAge = 0,
-  ): Promise<"success" | "no_bids" | "below_min_price" | "insufficient_liquidity" | "error"> {
+  ): Promise<
+    "success" | "partial" | "no_bids" | "below_min_price" | "insufficient_liquidity" | "error"
+  > {
     if (shares <= 0) return "success";
 
     try {
@@ -656,29 +682,18 @@ export class FillHandler {
         return "no_bids";
       }
 
-      // v3: Improved min price protection
-      // Take the HIGHER of: entry-based floor OR market-based floor
+      // Price floor gate: don't submit if market price is unacceptable
       const pos = this.state.getPosition(tokenId);
       const avgEntry = pos?.avgEntry ?? 0;
       const emergency = pendingSellAge > this.config.maxPendingSellAgeMs;
 
-      let currentMid = bestBid; // fallback
-      try {
-        const mid = await this.client.getMidpoint(tokenId);
-        if (mid > 0 && mid < 1) currentMid = mid;
-      } catch {
-        /* use bestBid as fallback */
-      }
-
       const entryFloor = avgEntry * this.config.minSellPriceRatio;
-      const marketFloor = currentMid * 0.85;
-      const minPrice = emergency ? 0.01 : Math.max(entryFloor, marketFloor);
+      const minPrice = emergency ? 0.01 : entryFloor;
 
       if (bestBid < minPrice && minPrice > 0.01) {
         this.logger.warn(
-          `Force sell ${tokenId.slice(0, 10)}: bestBid ${bestBid.toFixed(3)} below min price ` +
-            `${minPrice.toFixed(3)} (entry=${avgEntry.toFixed(3)}×${this.config.minSellPriceRatio}=${entryFloor.toFixed(3)}, ` +
-            `market=${currentMid.toFixed(3)}×0.85=${marketFloor.toFixed(3)}, ` +
+          `Force sell ${tokenId.slice(0, 10)}: bestBid ${bestBid.toFixed(3)} below floor ` +
+            `${minPrice.toFixed(3)} (entry=${avgEntry.toFixed(3)}×${this.config.minSellPriceRatio}, ` +
             `age=${(pendingSellAge / 1000).toFixed(0)}s, emergency=${emergency})`,
         );
         return "below_min_price";
@@ -686,39 +701,22 @@ export class FillHandler {
 
       if (emergency && bestBid < entryFloor) {
         this.logger.warn(
-          `EMERGENCY sell ${tokenId.slice(0, 10)}: selling at ${bestBid.toFixed(3)} (below normal min) ` +
+          `EMERGENCY sell ${tokenId.slice(0, 10)}: selling at ${bestBid.toFixed(3)} (below normal floor) ` +
             `after ${(pendingSellAge / 60_000).toFixed(1)}min stuck`,
         );
       }
 
-      // Check available bid liquidity (sum of bid sizes up to our sell amount)
-      let availableLiquidity = 0;
-      for (const bid of bids) {
-        availableLiquidity += parseFloat(bid.size);
-        if (availableLiquidity >= shares) break;
-      }
-
-      // Sell only what liquidity allows (with 5% safety margin)
-      const maxSellable = availableLiquidity * 0.95;
-      const actualShares = Math.min(shares, maxSellable);
-      if (actualShares < 1) {
-        this.logger.warn(
-          `Force sell ${tokenId.slice(0, 10)}: insufficient liquidity (${availableLiquidity.toFixed(1)} available, need ${shares.toFixed(1)})`,
-        );
-        return "insufficient_liquidity";
-      }
-
-      // v3: Use bestBid as sell price floor for best execution,
-      // but still respect minPrice as absolute floor
-      const sellPrice = Math.max(0.01, minPrice > 0.01 ? minPrice : 0.01);
+      // Market sell: FAK at floor price sweeps all bids down to floor
+      const sellPrice = Math.max(0.01, minPrice);
       const tickSize = (book.tick_size || "0.01") as import("@polymarket/clob-client").TickSize;
       const negRisk = book.neg_risk || false;
+      const sharesBefore = pos?.netShares ?? shares;
 
       await this.client.createAndPostOrder(
         {
           tokenID: tokenId,
           price: sellPrice,
-          size: actualShares,
+          size: shares,
           side: Side.SELL,
           feeRateBps: 0,
         },
@@ -727,23 +725,31 @@ export class FillHandler {
         false, // NOT postOnly — we want to cross the spread
       );
 
-      this.logger.info(
-        `Force SELL: ${actualShares.toFixed(1)} shares of ${tokenId.slice(0, 10)} @ ${sellPrice} (FAK, bestBid=${bestBid.toFixed(3)})`,
-      );
-
-      // Update position tracking
-      if (pos) {
-        this.state.updatePosition(
-          tokenId,
-          conditionId,
-          pos.outcome,
-          actualShares,
-          sellPrice,
-          "SELL",
-        );
+      // Query actual balance to determine real fill (FAK may partially fill)
+      let actualSold = shares; // assume full fill as fallback
+      try {
+        const remaining = await this.client.getConditionalBalance(tokenId);
+        if (remaining >= 0) {
+          actualSold = Math.max(0, sharesBefore - remaining);
+        }
+      } catch {
+        // balance query failed — use assumed full fill (reconcile will fix later)
       }
 
-      return "success";
+      const isPartial = actualSold < shares * 0.99;
+
+      this.logger.info(
+        `Force SELL: ${actualSold.toFixed(1)}/${shares.toFixed(1)} shares of ${tokenId.slice(0, 10)} ` +
+          `@ ${sellPrice} (FAK, bestBid=${bestBid.toFixed(3)}${isPartial ? ", PARTIAL" : ""})`,
+      );
+
+      // Update position tracking with actual sold amount
+      if (actualSold > 0 && pos) {
+        this.state.updatePosition(tokenId, conditionId, pos.outcome, actualSold, sellPrice, "SELL");
+      }
+
+      if (actualSold <= 0) return "insufficient_liquidity";
+      return isPartial ? "partial" : "success";
     } catch (err: any) {
       this.logger.error(`Force sell failed for ${tokenId.slice(0, 10)}: ${err.message}`);
       return "error";
