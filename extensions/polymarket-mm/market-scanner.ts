@@ -265,7 +265,8 @@ export class MarketScanner {
     const asks = book.asks || [];
     // CLOB API returns bids ascending (lowest first) — best bid is LAST
     const bestBid = bids.length > 0 ? parseFloat(bids[bids.length - 1].price) : 0;
-    const bestAsk = asks.length > 0 ? parseFloat(asks[0].price) : 1;
+    // CLOB API returns asks descending (highest first) — best ask is LAST
+    const bestAsk = asks.length > 0 ? parseFloat(asks[asks.length - 1].price) : 1;
     return (bestBid + bestAsk) / 2;
   }
 

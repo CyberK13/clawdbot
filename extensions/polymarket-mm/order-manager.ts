@@ -85,7 +85,7 @@ export class OrderManager {
       const isBuy = target.side === "BUY";
       const orderType = isBuy ? OrderType.GTD : OrderType.GTC;
       const expiration = isBuy
-        ? Math.floor(Date.now() / 1000) + 60 + 5 // 60s + 5s safety margin
+        ? Math.floor(Date.now() / 1000) + 60 + 60 // API has 60s security buffer, so +60+60 = 60s effective lifetime
         : undefined;
 
       const result = await this.client.createAndPostOrder(
@@ -158,7 +158,7 @@ export class OrderManager {
       try {
         const isBuy = target.side === "BUY";
         const orderType = isBuy ? OrderType.GTD : OrderType.GTC;
-        const expiration = isBuy ? Math.floor(Date.now() / 1000) + 60 + 5 : undefined;
+        const expiration = isBuy ? Math.floor(Date.now() / 1000) + 60 + 60 : undefined;
 
         const signedOrder = await this.client.createOrder(
           {

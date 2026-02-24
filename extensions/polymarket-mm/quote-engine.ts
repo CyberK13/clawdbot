@@ -400,8 +400,8 @@ export class QuoteEngine {
 
     // CLOB API returns bids ascending (lowest first) — best bid is LAST
     const bestBid = bids.length > 0 ? bids[bids.length - 1].price : 0;
-    // Asks are also ascending (lowest first) — best ask is FIRST (correct)
-    const bestAsk = asks.length > 0 ? asks[0].price : 1;
+    // CLOB API returns asks descending (highest first) — best ask is LAST
+    const bestAsk = asks.length > 0 ? asks[asks.length - 1].price : 1;
     const midpoint = (bestBid + bestAsk) / 2;
     const spread = bestAsk - bestBid;
 
