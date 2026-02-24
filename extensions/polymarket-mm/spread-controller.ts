@@ -114,10 +114,15 @@ export class SpreadController {
    * @param volatility - 5-minute realized volatility (as fraction, e.g. 0.02 = 2%)
    */
   updateVolatility(conditionId: string, volatility: number): void {
-    this.volatilities.set(conditionId, Math.max(0, volatility));
+    const newVol = Math.max(0, volatility);
+    const existing = this.volatilities.get(conditionId) ?? 0;
+    // EMA smoothing: alpha=0.3 for ~3-sample decay (prevents spiky vol readings)
+    const alpha = 0.3;
+    const smoothed = existing > 0 ? alpha * newVol + (1 - alpha) * existing : newVol;
+    this.volatilities.set(conditionId, smoothed);
     // Persist to state for monitoring
     const st = this.state.get();
-    const volRecord = { ...(st.spreadState?.volatility ?? {}), [conditionId]: volatility };
+    const volRecord = { ...(st.spreadState?.volatility ?? {}), [conditionId]: smoothed };
     this.state.update({
       spreadState: {
         ...st.spreadState,
@@ -157,23 +162,41 @@ export class SpreadController {
   }
 
   /**
-   * Reset spread to default (called periodically to decay widen overrides).
+   * Gradually decay spread overrides back toward default.
+   * Called every 60s. Halves the excess every 5 minutes for smooth decay.
    */
   decayOverride(): void {
     const st = this.state.get();
     if (!st.spreadState || st.spreadState.currentRatio <= this.config.defaultSpreadRatio) return;
 
-    // Decay back toward default over 10 minutes
     const elapsed = Date.now() - st.spreadState.lastAdjustedAt;
-    if (elapsed > 10 * 60_000) {
-      this.state.update({
-        spreadState: {
-          ...st.spreadState,
-          currentRatio: this.config.defaultSpreadRatio,
-          lastAdjustedAt: Date.now(),
-        },
-      });
+    if (elapsed < 60_000) return; // wait at least 1 minute
+
+    // Gradual decay: halve the excess every 5 minutes
+    const decayRate = Math.pow(0.5, elapsed / (5 * 60_000));
+    const excess = st.spreadState.currentRatio - this.config.defaultSpreadRatio;
+    const decayedExcess = excess * decayRate;
+
+    // Snap to default when close enough
+    const newRatio =
+      decayedExcess < 0.01
+        ? this.config.defaultSpreadRatio
+        : this.config.defaultSpreadRatio + decayedExcess;
+
+    this.state.update({
+      spreadState: {
+        ...st.spreadState,
+        currentRatio: newRatio,
+        lastAdjustedAt: Date.now(),
+      },
+    });
+
+    if (newRatio <= this.config.defaultSpreadRatio) {
       this.logger.info("Spread override decayed back to default");
+    } else {
+      this.logger.info(
+        `Spread override decaying: ${st.spreadState.currentRatio.toFixed(3)} → ${newRatio.toFixed(3)}`,
+      );
     }
   }
 }

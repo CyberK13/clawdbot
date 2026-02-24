@@ -302,10 +302,23 @@ export class MmEngine {
         await this.fillHandler.checkTimeouts();
       }
 
-      // --- Every 12 ticks (60s): reward scoring + spread decay ---
+      // --- Every 12 ticks (60s): reward scoring + spread decay + circuit breaker recovery ---
       if (this.tickCount % 12 === 0) {
         await this.rewards.checkScoring();
         this.spreadController.decayOverride();
+
+        // Auto-resume paused markets when circuit breaker cooldown expires
+        const paused = this.stateMgr.get().pausedMarkets;
+        if (paused.length > 0) {
+          const toResume = this.risk.getMarketsToResume(paused);
+          if (toResume.length > 0) {
+            const remaining = paused.filter((id) => !toResume.includes(id));
+            this.stateMgr.update({ pausedMarkets: remaining });
+            this.logger.info(
+              `Auto-resumed ${toResume.length} market(s): ${toResume.map((id) => id.slice(0, 10)).join(", ")}`,
+            );
+          }
+        }
       }
 
       // --- Every 60 ticks (5 min): balance refresh ---

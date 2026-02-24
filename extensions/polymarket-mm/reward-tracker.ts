@@ -11,7 +11,7 @@ import type { PolymarketClient } from "./client.js";
 import type { QuoteEngine } from "./quote-engine.js";
 import type { StateManager } from "./state.js";
 import type { MmMarket, RewardScore, BookSnapshot } from "./types.js";
-import { todayUTC, fmtUsd } from "./utils.js";
+import { todayUTC, fmtUsd, scoringFunction } from "./utils.js";
 
 export class RewardTracker {
   private logger: PluginLogger;
@@ -111,6 +111,11 @@ export class RewardTracker {
         books,
       );
 
+      // Measure competition from book (scoring-weighted USDC within spread)
+      const competition = yesBook
+        ? this.measureCompetition(yesBook, midpoint, market.rewardsMaxSpread)
+        : 0;
+
       scores.push({
         conditionId: market.conditionId,
         qOne,
@@ -119,6 +124,7 @@ export class RewardTracker {
         midpoint,
         twoSided,
         timestamp: Date.now(),
+        competition,
       });
     }
 
@@ -215,7 +221,7 @@ export class RewardTracker {
     const marketData = scores.map((score) => {
       const market = markets.find((m) => m.conditionId === score.conditionId);
       const dailyRate = market?.rewardsDailyRate ?? 0;
-      const estimatedShare = this.estimateOurShare(market!, score.qMin, 0);
+      const estimatedShare = this.estimateOurShare(market!, score.qMin, score.competition);
       totalEstDaily += estimatedShare;
 
       return {
@@ -251,8 +257,27 @@ export class RewardTracker {
   }
 
   /**
-   * Format reward status for display (Telegram).
+   * Measure scoring-weighted competition within the reward spread.
+   * Uses the same scoring function as Polymarket to weight orders.
    */
+  private measureCompetition(book: BookSnapshot, mid: number, maxSpread: number): number {
+    let weightedScore = 0;
+    for (const bid of book.bids) {
+      const spread = mid - bid.price;
+      if (spread > 0 && spread <= maxSpread) {
+        weightedScore += scoringFunction(maxSpread, spread, bid.size);
+      }
+    }
+    for (const ask of book.asks) {
+      const spread = ask.price - mid;
+      if (spread > 0 && spread <= maxSpread) {
+        weightedScore += scoringFunction(maxSpread, spread, ask.size);
+      }
+    }
+    return weightedScore;
+  }
+
+  /** Format reward status for display (Telegram). */
   formatRewardStatus(scores: RewardScore[], markets: MmMarket[]): string {
     const data = this.getRewardData(scores, markets);
 

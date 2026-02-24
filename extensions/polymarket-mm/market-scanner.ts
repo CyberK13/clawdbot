@@ -140,9 +140,18 @@ export class MarketScanner {
     // Skip effectively resolved markets where prices are extreme
     const p0 = token0.price || 0;
     const p1 = token1.price || 0;
-    if ((p0 < 0.02 || p0 > 0.98) && (p1 < 0.02 || p1 > 0.98)) {
+    if (p0 < 0.02 || p0 > 0.98 || p1 < 0.02 || p1 > 0.98) {
       this.logger.info(
         `Skipping ${cand.condition_id.slice(0, 16)}: resolved prices (${p0.toFixed(4)}/${p1.toFixed(4)})`,
+      );
+      return null;
+    }
+
+    // Volume filter: skip low-volume markets (unreliable books, harder exits)
+    const volume24h = parseFloat(detail.volume_num_24hr || detail.volume || "0");
+    if (this.config.minDailyVolume > 0 && volume24h < this.config.minDailyVolume) {
+      this.logger.info(
+        `Skipping ${cand.condition_id.slice(0, 16)}: volume $${volume24h.toFixed(0)} < min $${this.config.minDailyVolume}`,
       );
       return null;
     }
@@ -182,7 +191,8 @@ export class MarketScanner {
       const mid = this.midFromBook(book);
       competition = this.measureCompetition(book, mid, maxSpreadPrice);
     } catch {
-      // non-critical
+      // Default high competition: penalize markets with unknown orderbooks
+      competition = 500;
     }
 
     // Score: reward per dollar deployed, adjusted for scoring-weighted competition

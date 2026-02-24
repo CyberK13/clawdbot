@@ -149,6 +149,16 @@ export class QuoteEngine {
     const weights = this.config.levelSizeWeights;
     const spreadMult = this.config.levelSpreadMultiplier;
 
+    // Pre-compute usable levels and normalize weights so they sum to 1.0
+    // (higher levels may be skipped when their spread exceeds maxSpread)
+    let totalUsableWeight = 0;
+    for (let l = 0; l < this.config.numLevels; l++) {
+      const mult = l === 0 ? 1.0 : Math.pow(spreadMult, l);
+      if (baseHalfSpread * mult >= maxSpread) break;
+      totalUsableWeight += l < weights.length ? weights[l] : 1.0 / this.config.numLevels;
+    }
+    const weightNorm = totalUsableWeight > 0 ? 1.0 / totalUsableWeight : 1.0;
+
     for (let level = 0; level < this.config.numLevels; level++) {
       // Multi-level: each level uses geometrically increasing spread
       const levelSpreadMult = level === 0 ? 1.0 : Math.pow(spreadMult, level);
@@ -157,8 +167,9 @@ export class QuoteEngine {
       // Skip if this level would exceed max scoring spread
       if (levelSpread >= maxSpread) break;
 
-      // Size weight for this level (fall back to equal distribution)
-      const sizeWeight = level < weights.length ? weights[level] : 1.0 / this.config.numLevels;
+      // Size weight for this level, normalized to sum to 1.0 across usable levels
+      const rawWeight = level < weights.length ? weights[level] : 1.0 / this.config.numLevels;
+      const sizeWeight = rawWeight * weightNorm;
 
       // --- BID (buy) ---
       // When long (positive skew): widen bid (less aggressive buying)

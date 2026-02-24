@@ -241,6 +241,8 @@ export interface RewardScore {
   midpoint: number;
   twoSided: boolean;
   timestamp: number;
+  /** Estimated competition (scoring-weighted USDC within spread) */
+  competition: number;
 }
 
 // ---- Spread controller state -----------------------------------------------

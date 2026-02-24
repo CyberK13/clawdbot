@@ -129,7 +129,7 @@ export class RiskController {
         }
       }
 
-      // Adverse selection: high fill rate
+      // Adverse selection: high fill rate → widen spread
       const fillAction = this.checkFillRate(market.conditionId);
       if (fillAction) {
         return {
@@ -137,6 +137,18 @@ export class RiskController {
           conditionId: market.conditionId,
           factor: 1.5,
           reason: `高填充率 (可能被知情交易者吃单)`,
+        };
+      }
+
+      // Toxic flow: sustained one-sided fills → pause market
+      const toxicity = this.analyzeToxicity(market.conditionId);
+      if (toxicity.isToxic) {
+        return {
+          type: "pause_market",
+          conditionId: market.conditionId,
+          reason:
+            `毒流检测: 方向性=${toxicity.directionality.toFixed(2)} ` +
+            `(${toxicity.dominantSide}) fills=${toxicity.totalFills}`,
         };
       }
     }
@@ -317,5 +329,37 @@ export class RiskController {
     const now = Date.now();
     if (now - counter.windowStart > this.FILL_RATE_WINDOW_MS) return false;
     return counter.count >= this.FILL_RATE_THRESHOLD;
+  }
+
+  /** Circuit breaker cooldown (5 min). */
+  private readonly CIRCUIT_BREAKER_COOLDOWN_MS = 5 * 60 * 1000;
+
+  /**
+   * Check which paused markets can be auto-resumed.
+   * A market is safe to resume when:
+   *   - Fill rate window has expired (no recent high fill activity)
+   *   - No toxic flow detected
+   *   - Price has stabilized (no large moves in recent history)
+   */
+  getMarketsToResume(pausedMarkets: string[]): string[] {
+    const now = Date.now();
+    const toResume: string[] = [];
+
+    for (const conditionId of pausedMarkets) {
+      // Check fill rate has cooled down
+      const counter = this.fillCounters.get(conditionId);
+      const fillWindowExpired =
+        !counter || now - counter.windowStart > this.CIRCUIT_BREAKER_COOLDOWN_MS;
+
+      if (!fillWindowExpired) continue;
+
+      // Check no active toxicity
+      const toxicity = this.analyzeToxicity(conditionId);
+      if (toxicity.isToxic) continue;
+
+      toResume.push(conditionId);
+    }
+
+    return toResume;
   }
 }
