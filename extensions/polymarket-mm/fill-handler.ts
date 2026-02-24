@@ -263,7 +263,7 @@ export class FillHandler {
                   },
                   { tickSize: ps.marketTickSize as any, negRisk: ps.marketNegRisk ?? false },
                   OrderType.GTC,
-                  true, // postOnly for scoring — we want it to rest on the book
+                  false, // NOT postOnly — allow profitable immediate fill if bestBid > scoringPrice
                 );
 
                 const sellId = result?.orderID || result?.orderHashes?.[0];
@@ -614,11 +614,28 @@ export class FillHandler {
     const spreadFromMid = protectivePrice - mid;
     const isInScoringRange = spreadFromMid > 0 && spreadFromMid <= market.rewardsMaxSpread;
 
+    // Use ACTUAL total position size, not just this fill's size
+    const pos = this.state.getPosition(order.tokenId);
+    const totalShares = pos ? Math.max(0, pos.netShares) : fillSize;
+
     // Track pending sell BEFORE placing order (so checkTimeouts can upgrade later)
     const now = Date.now();
     const existingPs = this.state.getPendingSells()[order.tokenId];
     if (existingPs) {
-      existingPs.shares = fillSize;
+      // Cancel existing protective SELL to prevent orphaned orders
+      if (existingPs.sellOrderId) {
+        try {
+          await this.client.cancelOrder(existingPs.sellOrderId);
+          this.state.removeOrder(existingPs.sellOrderId);
+          this.logger.info(
+            `Cancelled old protective SELL ${existingPs.sellOrderId.slice(0, 10)} before re-placing`,
+          );
+        } catch {
+          // May already be filled — that's fine
+        }
+        existingPs.sellOrderId = undefined;
+      }
+      existingPs.shares = totalShares;
       existingPs.fillMidpoint = fillMidpoint;
       existingPs.urgency = "low";
       existingPs.isScoring = isInScoringRange;
@@ -631,7 +648,7 @@ export class FillHandler {
       this.state.setPendingSell(order.tokenId, {
         tokenId: order.tokenId,
         conditionId: order.conditionId,
-        shares: fillSize,
+        shares: totalShares,
         placedAt: now,
         retryCount: 0,
         lastAttemptAt: now,
@@ -646,13 +663,13 @@ export class FillHandler {
       });
     }
 
-    // Place protective SELL — NOT postOnly (we WANT it to cross if bestBid > protectivePrice)
+    // Place protective SELL for TOTAL position — NOT postOnly (allow immediate fill for protection)
     try {
       const result = await this.client.createAndPostOrder(
         {
           tokenID: order.tokenId,
           price: protectivePrice,
-          size: fillSize,
+          size: totalShares,
           side: Side.SELL,
           feeRateBps: 0,
         },
@@ -675,7 +692,7 @@ export class FillHandler {
           conditionId: order.conditionId,
           side: "SELL",
           price: protectivePrice,
-          originalSize: fillSize,
+          originalSize: totalShares,
           filledSize: 0,
           status: "live",
           scoring: isInScoringRange,
@@ -684,9 +701,9 @@ export class FillHandler {
         });
 
         this.logger.info(
-          `🛡️ Protective SELL: ${fillSize.toFixed(1)} @ ${protectivePrice.toFixed(4)} ` +
+          `🛡️ Protective SELL: ${totalShares.toFixed(1)} @ ${protectivePrice.toFixed(4)} ` +
             `(entry=${order.price.toFixed(4)}, mid=${mid.toFixed(4)}, spread=${(spreadFromMid * 100).toFixed(2)}c, ` +
-            `scoring=${isInScoringRange})`,
+            `scoring=${isInScoringRange}, fill=${fillSize.toFixed(1)}, total=${totalShares.toFixed(1)})`,
         );
       }
     } catch (err: any) {

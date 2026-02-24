@@ -16,6 +16,7 @@ const WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
 /** Trade event from Polymarket WebSocket user channel */
 interface WsTradeEvent {
   event_type: "trade";
+  id: string; // unique trade ID
   asset_id: string;
   market: string; // conditionId
   side: string;
@@ -70,6 +71,8 @@ export class WsFeed {
   private processedTrades = new Set<string>();
   /** Prune processed trades every 5 min */
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
+  /** Sequential queue to prevent concurrent fill handling */
+  private fillQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private opts: WsFeedOptions,
@@ -214,8 +217,8 @@ export class WsFeed {
     // MINED/CONFIRMED are follow-up statuses for the same trade
     if (trade.status !== "MATCHED") return;
 
-    // Deduplicate by trade ID
-    const tradeKey = trade.taker_order_id + "_" + trade.timestamp;
+    // Deduplicate by unique trade ID
+    const tradeKey = trade.id || trade.taker_order_id + "_" + trade.timestamp;
     if (this.processedTrades.has(tradeKey)) return;
     this.processedTrades.add(tradeKey);
 
@@ -259,10 +262,12 @@ export class WsFeed {
     }
     this.state.trackOrder(matched);
 
-    // Route to engine's fill handler
-    this.onFill(matched, actualFill).catch((err) => {
-      this.logger.error(`WS fill handler error: ${err.message}`);
-    });
+    // Route to engine's fill handler — sequential queue prevents concurrent processing
+    this.fillQueue = this.fillQueue
+      .then(() => this.onFill(matched!, actualFill))
+      .catch((err) => {
+        this.logger.error(`WS fill handler error: ${err.message}`);
+      });
   }
 
   /** Whether the WebSocket is currently connected. */
