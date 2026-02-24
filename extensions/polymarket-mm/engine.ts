@@ -128,7 +128,10 @@ export class MmEngine {
     this.logger.info(`Balance: $${this.cachedBalance.toFixed(2)}`);
 
     if (this.cachedBalance < this.config.totalCapital) {
-      this.config.totalCapital = this.cachedBalance;
+      // Don't overwrite totalCapital — it's the drawdown denominator and represents
+      // the operator's configured risk tolerance. Shrinking it to balance creates a
+      // death spiral: losses → smaller denominator → amplified drawdown % → premature kill.
+      // Only adjust deployment limits to match available funds.
       this.config.maxCapitalPerMarket = Math.min(
         this.config.maxCapitalPerMarket,
         this.cachedBalance * 0.95,
@@ -142,8 +145,10 @@ export class MmEngine {
         this.cachedBalance * 0.95,
       );
       this.logger.info(
-        `Capital adjusted to balance: orderSize=$${this.config.orderSize.toFixed(0)}, ` +
-          `maxPerMarket=$${this.config.maxCapitalPerMarket.toFixed(0)}`,
+        `Deployment limits adjusted to balance $${this.cachedBalance.toFixed(0)}: ` +
+          `orderSize=$${this.config.orderSize.toFixed(0)}, ` +
+          `maxPerMarket=$${this.config.maxCapitalPerMarket.toFixed(0)} ` +
+          `(drawdown ref=$${this.config.totalCapital})`,
       );
     }
 
@@ -289,6 +294,11 @@ export class MmEngine {
 
   isRunning(): boolean {
     return this.running;
+  }
+
+  /** True after kill switch — engine must be recreated (fresh StateManager from disk). */
+  isKilled(): boolean {
+    return this.stateMgr.get().killSwitchTriggered === true;
   }
 
   startDashboard(port = 3800, password = ""): void {

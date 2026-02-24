@@ -87,6 +87,14 @@ export default function register(api: OpenClawPluginApi) {
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx) => {
+      // After kill switch, engine must be recreated to load fresh state from disk.
+      // StateManager only reads disk in constructor — reusing a killed engine means
+      // stale in-memory state (totalPnl, positions) that ignores any disk resets.
+      if (engine?.isKilled()) {
+        engine.stopDashboard();
+        engine = null;
+      }
+
       if (!engine) {
         // Lazy init if env vars are available
         const privateKey =

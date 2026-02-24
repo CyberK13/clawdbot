@@ -42,6 +42,8 @@ export class RiskController {
   private logger: PluginLogger;
   private priceHistory: Map<string, PriceSnapshot[]> = new Map();
   private fillCounters: Map<string, FillCounter> = new Map();
+  /** Timestamp of last fill — kill switch defers during grace period to let sells settle. */
+  private lastFillAt = 0;
 
   /** Price move threshold: >10% in 5 minutes triggers circuit breaker. */
   private readonly PRICE_MOVE_THRESHOLD = 0.1;
@@ -54,6 +56,8 @@ export class RiskController {
   /** Toxicity thresholds */
   private readonly TOXICITY_DIRECTIONALITY_THRESHOLD = 0.6;
   private readonly TOXICITY_MIN_FILLS = 3;
+  /** Grace period after fill: defer kill switch to allow sell settlement. */
+  private readonly KILL_GRACE_AFTER_FILL_MS = 15_000;
 
   constructor(
     private client: PolymarketClient,
@@ -79,6 +83,21 @@ export class RiskController {
     const totalPnl = st.totalPnl + this.state.getUnrealizedPnl(priceMap);
     const drawdownPct = (Math.abs(Math.min(0, totalPnl)) / this.config.totalCapital) * 100;
     if (drawdownPct >= this.config.maxDrawdownPercent) {
+      // Grace period after fill: tokens need time to settle before sells can execute.
+      // Without this, kill switch fires before the fill handler can place recovery sells,
+      // making every BUY fill an instant kill.
+      const sinceFill = Date.now() - this.lastFillAt;
+      if (this.lastFillAt > 0 && sinceFill < this.KILL_GRACE_AFTER_FILL_MS) {
+        this.logger.warn(
+          `风控: drawdown ${drawdownPct.toFixed(1)}% 超限, 但fill宽限期中 (${(sinceFill / 1000).toFixed(0)}s/${(this.KILL_GRACE_AFTER_FILL_MS / 1000).toFixed(0)}s), 暂缓kill`,
+        );
+        // Still return a reduce action to prevent further buying
+        return {
+          type: "reduce_all",
+          factor: 0,
+          reason: `回撤 ${drawdownPct.toFixed(1)}% — fill宽限期, 暂停新单`,
+        };
+      }
       return {
         type: "kill",
         reason: `总回撤 ${drawdownPct.toFixed(1)}% 超过限制 ${this.config.maxDrawdownPercent}%`,
@@ -171,6 +190,7 @@ export class RiskController {
    */
   recordFill(conditionId: string, tokenId?: string, side?: "BUY" | "SELL", size?: number): void {
     const now = Date.now();
+    this.lastFillAt = now;
     let counter = this.fillCounters.get(conditionId);
     if (!counter || now - counter.windowStart > this.FILL_RATE_WINDOW_MS) {
       counter = {

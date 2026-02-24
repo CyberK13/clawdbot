@@ -868,18 +868,39 @@ export class FillHandler {
       const negRisk = book.neg_risk || false;
       const sharesBefore = pos?.netShares ?? shares;
 
-      await this.client.createAndPostOrder(
-        {
-          tokenID: tokenId,
-          price: sellPrice,
-          size: shares,
-          side: Side.SELL,
-          feeRateBps: 0,
-        },
-        { tickSize, negRisk },
-        OrderType.FAK,
-        false, // NOT postOnly — we want to cross the spread
-      );
+      // Attempt FAK sell — retry once after delay if "not enough balance" (tokens settling)
+      let sellAttempts = 0;
+      const maxSellAttempts = 2;
+      while (sellAttempts < maxSellAttempts) {
+        try {
+          await this.client.createAndPostOrder(
+            {
+              tokenID: tokenId,
+              price: sellPrice,
+              size: shares,
+              side: Side.SELL,
+              feeRateBps: 0,
+            },
+            { tickSize, negRisk },
+            OrderType.FAK,
+            false, // NOT postOnly — we want to cross the spread
+          );
+          break; // success
+        } catch (sellErr: any) {
+          sellAttempts++;
+          if (
+            sellAttempts < maxSellAttempts &&
+            (sellErr.message?.includes("balance") || sellErr.message?.includes("allowance"))
+          ) {
+            this.logger.warn(
+              `Force sell ${tokenId.slice(0, 10)}: balance not settled, waiting 5s before retry...`,
+            );
+            await new Promise((r) => setTimeout(r, 5_000));
+            continue;
+          }
+          throw sellErr; // rethrow if not a balance issue or out of retries
+        }
+      }
 
       // Query actual balance to determine real fill (FAK may partially fill)
       let actualSold = shares; // assume full fill as fallback
