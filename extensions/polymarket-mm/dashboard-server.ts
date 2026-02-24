@@ -121,7 +121,10 @@ export class DashboardServer {
       activeMarkets: st.activeMarkets.length,
       maxMarkets: status.config.maxConcurrentMarkets,
       capital: st.capital,
-      totalRewards: st.totalRewardsEstimate,
+      totalRewards: (st.rewardHistory || []).reduce(
+        (sum: number, h: { actual?: number }) => sum + (h.actual || 0),
+        0,
+      ),
       killSwitch: st.killSwitchTriggered,
       dayPaused: st.dayPaused,
       startedAt: st.startedAt,
