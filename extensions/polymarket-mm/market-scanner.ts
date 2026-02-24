@@ -199,12 +199,21 @@ export class MarketScanner {
       competition = 500;
     }
 
-    // Score: reward per dollar deployed, adjusted for scoring-weighted competition
+    // Score: reward per dollar deployed, adjusted for competition and capital efficiency
     // Wider maxSpread markets are easier to score in → boost with sqrt(maxSpread/0.03)
     const TWO_SIDED_BOOST = 3.0;
     const spreadBoost = Math.sqrt(maxSpreadPrice / 0.03);
+
+    // Capital efficiency factor: penalize extreme prices where Q_min is bottlenecked.
+    // At extremes (YES=0.03/NO=0.97), equal USDC buys hugely unequal shares,
+    // and even with Q_min-balanced allocation, absolute Q_min is low.
+    // 4×p0×p1 peaks at 1.0 (50/50) → 0.14 for Jesus Christ (0.037/0.963)
+    const capitalEfficiency = 4 * yesPrice * noPrice; // 0→1, peaks at balanced prices
+
     const score =
-      (cand.dailyRate * TWO_SIDED_BOOST * spreadBoost) / (competition + 50) / (requiredCapital + 1);
+      (cand.dailyRate * TWO_SIDED_BOOST * spreadBoost * capitalEfficiency) /
+      (competition + 50) /
+      (requiredCapital + 1);
 
     const mmTokens: MmToken[] = [
       {
