@@ -173,7 +173,10 @@ export class OrderManager {
         );
 
         // Parse order IDs from response and track
-        const orderIds: string[] = result?.orderIDs || result?.orderHashes || [];
+        // postOrders returns array of { orderID, status, success } per order
+        const orderIds: string[] = Array.isArray(result)
+          ? result.map((r: any) => r.orderID || r.orderHash).filter(Boolean)
+          : result?.orderIDs || result?.orderHashes || [];
         for (let j = 0; j < chunk.length; j++) {
           const orderId = orderIds[j];
           if (!orderId) continue;

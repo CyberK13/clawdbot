@@ -167,7 +167,22 @@ export class SpreadController {
    */
   decayOverride(): void {
     const st = this.state.get();
-    if (!st.spreadState || st.spreadState.currentRatio <= this.config.defaultSpreadRatio) return;
+    if (!st.spreadState) return;
+
+    // Guard against NaN in persisted state (reset to default)
+    if (isNaN(st.spreadState.currentRatio)) {
+      this.state.update({
+        spreadState: {
+          ...st.spreadState,
+          currentRatio: this.config.defaultSpreadRatio,
+          lastAdjustedAt: Date.now(),
+        },
+      });
+      this.logger.info("Spread state had NaN ratio, reset to default");
+      return;
+    }
+
+    if (st.spreadState.currentRatio <= this.config.defaultSpreadRatio) return;
 
     const elapsed = Date.now() - st.spreadState.lastAdjustedAt;
     if (elapsed < 60_000) return; // wait at least 1 minute
