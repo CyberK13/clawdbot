@@ -130,7 +130,7 @@ export class MmEngine {
       );
       this.config.orderSize = Math.min(
         this.config.orderSize,
-        this.cachedBalance * 0.45, // ~half per token (YES+NO)
+        this.cachedBalance * 0.475, // ~half per token; Q_min allocation redistributes optimally
       );
       this.config.maxTotalExposure = Math.min(
         this.config.maxTotalExposure,

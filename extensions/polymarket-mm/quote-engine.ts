@@ -75,6 +75,11 @@ export class QuoteEngine {
     const quotes: TargetQuote[] = [];
     const v = market.rewardsMaxSpread;
 
+    // Q_min balanced allocation: distribute combined budget proportionally
+    // to token prices so both sides get similar share counts.
+    // This maximizes Q_min = min(Q_one, Q_two) for extreme price markets.
+    const tokenBudgets = this.calculateTokenBudgets(market, books, sizeFactor);
+
     for (const token of market.tokens) {
       const book = books.get(token.tokenId);
       if (!book) {
@@ -82,16 +87,88 @@ export class QuoteEngine {
         continue;
       }
 
-      const tokenQuotes = this.generateTokenQuotes(market, token.tokenId, book, v, sizeFactor);
+      const budget = tokenBudgets.get(token.tokenId) ?? this.config.orderSize * sizeFactor;
+      const tokenQuotes = this.generateTokenQuotes(market, token.tokenId, book, v, budget);
       if (tokenQuotes.length === 0) {
         this.logger.warn(
-          `No quotes for ${token.outcome} (mid=${book.midpoint.toFixed(3)}, maxSpread=${v}, minSize=${market.rewardsMinSize}, orderSize=$${this.config.orderSize}×${sizeFactor.toFixed(2)})`,
+          `No quotes for ${token.outcome} (mid=${book.midpoint.toFixed(3)}, budget=$${budget.toFixed(1)})`,
         );
       }
       quotes.push(...tokenQuotes);
     }
 
     return quotes;
+  }
+
+  /**
+   * Calculate per-token USDC budgets that maximize Q_min.
+   *
+   * For extreme price markets (e.g. YES=0.03, NO=0.97), equal USDC split
+   * gives hugely imbalanced shares (YES=2000, NO=65). Since Q_min = min(Q_one, Q_two)
+   * and Q scores are weighted by shares, the expensive side bottlenecks Q_min.
+   *
+   * Solution: allocate proportionally to midpoint price so both sides get
+   * approximately equal share counts: budget_i/price_i ≈ constant.
+   */
+  private calculateTokenBudgets(
+    market: MmMarket,
+    books: Map<string, BookSnapshot>,
+    sizeFactor: number,
+  ): Map<string, number> {
+    const budgets = new Map<string, number>();
+    const perTokenBudget = this.config.orderSize * sizeFactor;
+
+    if (market.tokens.length !== 2) {
+      for (const t of market.tokens) budgets.set(t.tokenId, perTokenBudget);
+      return budgets;
+    }
+
+    const [t0, t1] = market.tokens;
+    const mid0 = books.get(t0.tokenId)?.midpoint ?? t0.price;
+    const mid1 = books.get(t1.tokenId)?.midpoint ?? t1.price;
+    const totalMid = mid0 + mid1;
+
+    // Sanity check: prices should sum to ~1.0 for binary markets
+    if (totalMid <= 0 || totalMid > 1.5) {
+      for (const t of market.tokens) budgets.set(t.tokenId, perTokenBudget);
+      return budgets;
+    }
+
+    // Combined budget = 2 × perTokenBudget (total for both tokens)
+    const combinedBudget = perTokenBudget * 2;
+
+    // Q_min optimal: allocate proportionally to price
+    // budget_i = combined × mid_i / (mid_0 + mid_1)
+    // → shares_i = budget_i / mid_i = combined / totalMid (equal for both!)
+    let budget0 = (combinedBudget * mid0) / totalMid;
+    let budget1 = (combinedBudget * mid1) / totalMid;
+
+    // Floor: ensure each side can afford rewardsMinSize shares
+    const minBudget0 = market.rewardsMinSize * mid0 * 1.1; // 10% headroom
+    const minBudget1 = market.rewardsMinSize * mid1 * 1.1;
+    if (budget0 < minBudget0 && minBudget0 < combinedBudget * 0.5) {
+      budget0 = minBudget0;
+      budget1 = combinedBudget - budget0;
+    }
+    if (budget1 < minBudget1 && minBudget1 < combinedBudget * 0.5) {
+      budget1 = minBudget1;
+      budget0 = combinedBudget - budget1;
+    }
+
+    budgets.set(t0.tokenId, budget0);
+    budgets.set(t1.tokenId, budget1);
+
+    // Log allocation when significantly unequal (ratio > 3:1)
+    const ratio = Math.max(budget0, budget1) / Math.max(Math.min(budget0, budget1), 0.01);
+    if (ratio > 3) {
+      this.logger.info(
+        `Q_min balanced: ${t0.outcome}=$${budget0.toFixed(1)} (${((budget0 / combinedBudget) * 100).toFixed(0)}%) ` +
+          `${t1.outcome}=$${budget1.toFixed(1)} (${((budget1 / combinedBudget) * 100).toFixed(0)}%) ` +
+          `shares≈${(budget0 / mid0).toFixed(0)}/${(budget1 / mid1).toFixed(0)}`,
+      );
+    }
+
+    return budgets;
   }
 
   /**
@@ -107,7 +184,7 @@ export class QuoteEngine {
     tokenId: string,
     book: BookSnapshot,
     maxSpread: number,
-    sizeFactor: number,
+    tokenBudget: number, // Q_min-optimized USDC budget for this token
   ): TargetQuote[] {
     const quotes: TargetQuote[] = [];
     const tickSize = market.tickSize;
@@ -135,10 +212,9 @@ export class QuoteEngine {
     // Adaptive order sizing: ensure shares >= minScoringSize for reward eligibility.
     // If fixed orderSize doesn't produce enough shares, auto-scale up.
     const minScoringSize = market.rewardsMinSize;
-    // Per-token cap: use requiredCapital from scanner (accounts for both tokens)
-    // or fallback to maxCapitalPerMarket. Allow up to 90% of per-market budget
-    // for a single token since complement token is much cheaper at extremes.
-    const maxOrderUsdc = this.config.maxCapitalPerMarket * 0.9;
+    // Per-token cap: use the Q_min-optimized token budget.
+    // Allow some headroom for minScoringSize adjustments.
+    const maxOrderUsdc = tokenBudget * 1.2;
 
     // Check available inventory for SELL orders
     const pos = this.state.getPosition(tokenId);
@@ -193,7 +269,7 @@ export class QuoteEngine {
       const bidActualSpread = midpoint - bidPrice;
       if (bidActualSpread <= maxSpread && bidPrice > 0) {
         // Adaptive sizing with level weight: guarantee shares >= minScoringSize
-        const levelOrderSize = this.config.orderSize * sizeFactor * sizeWeight;
+        const levelOrderSize = tokenBudget * sizeWeight;
         const baseShares = usdcToShares(levelOrderSize, bidPrice);
         const targetShares = Math.max(minScoringSize, baseShares);
         const adjustedUsdc = targetShares * bidPrice;
