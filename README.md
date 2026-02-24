@@ -1,3 +1,47 @@
+# ClawdBot — CyberOracle AI Trading & Personal Assistant
+
+> Fork of [OpenClaw](https://github.com/openclaw/openclaw), customized by CyberK13 for automated trading, market making, and personal AI assistant workflows.
+
+## ClawdBot Extensions
+
+### Polymarket Market Maker (`extensions/polymarket-mm/`)
+
+Automated liquidity provision on Polymarket prediction markets, optimized for reward harvesting.
+
+**Features (v4b — 2026-02-25):**
+
+- Livermore trailing stop exit system (hard stop -2%, trailing activation +1%, trailing stop -1% from peak)
+- Two-sided quoting with cancel-on-fill: BUY YES + BUY NO for 3x rewards, cancel other side on fill
+- Dynamic capital sizing from actual USDC balance (no hardcoded amounts)
+- 4-factor continuous spread model (fill rate + volatility + inventory + extreme price)
+- Toxic flow detection + circuit breakers + kill switch with 15s fill grace period
+- Auto-redemption of resolved market positions (on-chain CTF contract)
+- Neg-risk book inversion correction for accurate pricing
+- Batch API operations (orderbooks, midpoints, order placement)
+- WebSocket real-time fill detection + polling for book/quote refresh
+- Web dashboard with pixel art UI at `cyberk.cyberoracle.net`
+- Full Telegram command interface (`/mm start|stop|kill|status|portfolio|rewards|...`)
+
+**Risk Controls:**
+
+- Peak balance high watermark for drawdown calculation (prevents death spiral)
+- Daily loss limit, per-market exposure caps, adverse selection detection
+- Automatic market pause on rapid price movement (>10% in 5min)
+- Emergency kill switch with 3-attempt liquidation
+- Orphan position detection and cleanup on startup/rescan
+
+### Gmail Digest (`scripts/gmail-digest-all.py`)
+
+On-demand email digest via Telegram `/mail` command. AI-powered summarization using Gemini 3 Flash with DeepSeek V3 fallback.
+
+### Deployment
+
+- **VPS**: Vultr Tokyo, Ubuntu, systemd service
+- **Dashboard**: `cyberk.cyberoracle.net` (Nginx reverse proxy)
+- **Monitoring**: 2-hourly TG status reports via cron
+
+---
+
 # 🦞 OpenClaw — Personal AI Assistant
 
 <p align="center">

@@ -107,6 +107,32 @@ export class MmEngine {
     );
     // Wire risk controller → fill handler for toxicity analysis
     this.fillHandler.setRiskController(this.risk);
+    // Wire auto-redeem callback for resolved markets
+    this.fillHandler.setRedeemCallback(async (conditionId: string) => {
+      await this.redeemPosition(conditionId);
+    });
+  }
+
+  // ---- Capital sizing (dynamic from balance) --------------------------------
+
+  /**
+   * Compute all sizing parameters from actual USDC balance.
+   * Called on startup and every 5-min balance refresh.
+   * Sizing scales up/down with actual funds — no hardcoded amounts.
+   */
+  private adjustSizingToBalance(balance: number): void {
+    this.config.orderSize = Math.max(1, balance * this.config.orderSizeRatio);
+    this.config.maxCapitalPerMarket = Math.max(1, balance * this.config.deployRatio);
+    this.config.maxTotalExposure = Math.max(1, balance * this.config.deployRatio);
+    this.config.opportunisticSize = Math.max(1, balance * 0.1);
+
+    // Update peak balance (high watermark for drawdown)
+    const st = this.stateMgr.get();
+    const peak = st.peakBalance || 0;
+    if (balance > peak) {
+      this.stateMgr.update({ peakBalance: balance });
+    }
+    this.stateMgr.update({ capital: balance });
   }
 
   // ---- Lifecycle -----------------------------------------------------------
@@ -122,35 +148,15 @@ export class MmEngine {
     this.stateMgr.startAutoSave();
     await this.inventory.reconcile();
 
-    // Get initial balance and adjust capital config to match actual funds
+    // Get balance and compute all sizing dynamically
     this.cachedBalance = await this.client.getBalance();
-    this.stateMgr.update({ capital: this.cachedBalance });
-    this.logger.info(`Balance: $${this.cachedBalance.toFixed(2)}`);
-
-    if (this.cachedBalance < this.config.totalCapital) {
-      // Don't overwrite totalCapital — it's the drawdown denominator and represents
-      // the operator's configured risk tolerance. Shrinking it to balance creates a
-      // death spiral: losses → smaller denominator → amplified drawdown % → premature kill.
-      // Only adjust deployment limits to match available funds.
-      this.config.maxCapitalPerMarket = Math.min(
-        this.config.maxCapitalPerMarket,
-        this.cachedBalance * 0.95,
-      );
-      this.config.orderSize = Math.min(
-        this.config.orderSize,
-        this.cachedBalance * 0.475, // ~half per token; Q_min allocation redistributes optimally
-      );
-      this.config.maxTotalExposure = Math.min(
-        this.config.maxTotalExposure,
-        this.cachedBalance * 0.95,
-      );
-      this.logger.info(
-        `Deployment limits adjusted to balance $${this.cachedBalance.toFixed(0)}: ` +
-          `orderSize=$${this.config.orderSize.toFixed(0)}, ` +
-          `maxPerMarket=$${this.config.maxCapitalPerMarket.toFixed(0)} ` +
-          `(drawdown ref=$${this.config.totalCapital})`,
-      );
-    }
+    this.adjustSizingToBalance(this.cachedBalance);
+    this.logger.info(
+      `Balance: $${this.cachedBalance.toFixed(2)} → ` +
+        `orderSize=$${this.config.orderSize.toFixed(0)}, ` +
+        `maxPerMarket=$${this.config.maxCapitalPerMarket.toFixed(0)}, ` +
+        `peakBalance=$${(this.stateMgr.get().peakBalance || 0).toFixed(0)}`,
+    );
 
     // Initial market scan
     await this.scanner.scan();
@@ -346,6 +352,9 @@ export class MmEngine {
       // Update books for active markets
       await this.refreshBooks();
 
+      // Trailing stop check (every tick, uses fresh priceMap)
+      await this.fillHandler.checkTrailingStops(this.priceMap);
+
       // Risk check
       const riskAction = this.risk.check(this.activeMarkets, this.books, this.priceMap);
       if (riskAction.type !== "ok") {
@@ -395,10 +404,11 @@ export class MmEngine {
         }
       }
 
-      // --- Every 60 ticks (5 min): balance refresh ---
+      // --- Every 60 ticks (5 min): balance refresh + resize ---
       if (this.tickCount % 60 === 0) {
         try {
           this.cachedBalance = await this.client.getBalance();
+          this.adjustSizingToBalance(this.cachedBalance);
         } catch {
           // non-critical
         }
@@ -454,7 +464,8 @@ export class MmEngine {
         }
         allTokens.push({ tokenId: token.tokenId, market });
       }
-      const exposureRatio = marketExposure / this.config.maxCapitalPerMarket;
+      const exposureRatio =
+        this.config.maxCapitalPerMarket > 0 ? marketExposure / this.config.maxCapitalPerMarket : 0;
       this.spreadController.updateExposureRatio(market.conditionId, exposureRatio);
     }
 
@@ -510,6 +521,14 @@ export class MmEngine {
           );
           this.lastMidCorrection.set(tokenId, trueMid);
         }
+        // If book is inverted (neg_risk), also correct bestBid/bestAsk
+        if (Math.abs(snapshot.midpoint - trueMid) > 0.3) {
+          const oldBestBid = snapshot.bestBid;
+          const oldBestAsk = snapshot.bestAsk;
+          snapshot.bestBid = oldBestAsk > 0 ? 1 - oldBestAsk : 0;
+          snapshot.bestAsk = oldBestBid > 0 ? 1 - oldBestBid : 1;
+          snapshot.spread = snapshot.bestAsk - snapshot.bestBid;
+        }
         snapshot.midpoint = trueMid;
       }
 
@@ -544,6 +563,14 @@ export class MmEngine {
                 );
                 this.lastMidCorrection.set(token.tokenId, trueMid);
               }
+              // If book is inverted (neg_risk), also correct bestBid/bestAsk
+              if (Math.abs(snapshot.midpoint - trueMid) > 0.3) {
+                const oldBestBid = snapshot.bestBid;
+                const oldBestAsk = snapshot.bestAsk;
+                snapshot.bestBid = oldBestAsk > 0 ? 1 - oldBestAsk : 0;
+                snapshot.bestAsk = oldBestBid > 0 ? 1 - oldBestBid : 1;
+                snapshot.spread = snapshot.bestAsk - snapshot.bestBid;
+              }
               snapshot.midpoint = trueMid;
             }
           } catch {
@@ -572,6 +599,13 @@ export class MmEngine {
       if (this.stateMgr.get().pausedMarkets.includes(market.conditionId)) {
         continue;
       }
+
+      // Skip markets with active positions — holding mode, trailing stop manages exit
+      const hasPosition = market.tokens.some((t) => {
+        const pos = this.stateMgr.getPosition(t.tokenId);
+        return pos && pos.netShares > 0;
+      });
+      if (hasPosition) continue;
 
       const quotes = this.quoteEngine.generateQuotes(market, this.books, sizeFactor);
       this.currentQuotes.set(market.conditionId, quotes);
@@ -602,8 +636,38 @@ export class MmEngine {
         `(${market?.question.slice(0, 30) ?? "?"}…)`,
     );
 
-    // Delegate to FillHandler for capital recovery (BUY fills only)
-    await this.fillHandler.handleFill(order, fillSize, market);
+    // Delegate to FillHandler for trailing stop init (BUY fills only)
+    const currentMid = this.priceMap.get(order.tokenId) ?? order.price;
+    await this.fillHandler.handleFill(order, fillSize, market, currentMid);
+
+    // After BUY fill: cancel all market orders → enter holding mode (trailing stop)
+    if (order.side === "BUY" && market) {
+      await this.orderMgr.cancelMarketOrders(market.conditionId);
+      this.logger.info(
+        `📍 持仓模式: 撤销 ${market.question.slice(0, 25)}… 全部挂单, trailing stop 接管`,
+      );
+
+      // Conflict check: if BOTH tokens have positions (race condition), sell the smaller one
+      const bothPositions = market.tokens
+        .map((t) => ({ token: t, pos: this.stateMgr.getPosition(t.tokenId) }))
+        .filter(({ pos }) => pos && pos.netShares > 0);
+
+      if (bothPositions.length > 1) {
+        // Opposing positions — sell the smaller one immediately
+        bothPositions.sort(
+          (a, b) => a.pos!.netShares * a.pos!.avgEntry - b.pos!.netShares * b.pos!.avgEntry,
+        );
+        const toSell = bothPositions[0];
+        this.logger.warn(
+          `⚠️ 双边冲突: ${toSell.token.outcome} ${toSell.pos!.netShares.toFixed(1)} shares 立刻卖出`,
+        );
+        await this.fillHandler.forceSellPublic(
+          toSell.token.tokenId,
+          toSell.pos!.conditionId,
+          toSell.pos!.netShares,
+        );
+      }
+    }
   }
 
   private async handleRiskAction(action: import("./types.js").RiskAction): Promise<void> {
@@ -926,9 +990,9 @@ export class MmEngine {
       );
     }
 
-    // Refresh balance
+    // Refresh balance and resize
     this.cachedBalance = await this.client.getBalance();
-    this.stateMgr.update({ capital: this.cachedBalance });
+    this.adjustSizingToBalance(this.cachedBalance);
     this.stateMgr.forceSave();
 
     return txHash;

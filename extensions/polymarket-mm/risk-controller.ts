@@ -79,9 +79,10 @@ export class RiskController {
   ): RiskAction {
     const st = this.state.get();
 
-    // 1. Kill switch: total drawdown
+    // 1. Kill switch: total drawdown (relative to peak balance high watermark)
     const totalPnl = st.totalPnl + this.state.getUnrealizedPnl(priceMap);
-    const drawdownPct = (Math.abs(Math.min(0, totalPnl)) / this.config.totalCapital) * 100;
+    const peakBalance = st.peakBalance || st.capital || 100; // fallback if unset
+    const drawdownPct = (Math.abs(Math.min(0, totalPnl)) / peakBalance) * 100;
     if (drawdownPct >= this.config.maxDrawdownPercent) {
       // Grace period after fill: tokens need time to settle before sells can execute.
       // Without this, kill switch fires before the fill handler can place recovery sells,

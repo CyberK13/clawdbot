@@ -13,8 +13,12 @@ import type {
 // ---- Configuration ---------------------------------------------------------
 
 export interface MmConfig {
-  // Capital
-  totalCapital: number;
+  // Capital — dynamic from balance
+  /** Fraction of balance to deploy per market (e.g. 0.95 = 95%) */
+  deployRatio: number;
+  /** Fraction of balance for per-token order size (e.g. 0.475 = 47.5%) */
+  orderSizeRatio: number;
+  /** Computed at runtime from balance × deployRatio */
   maxCapitalPerMarket: number;
   /** Fraction of capital to keep as reserve (0-1) */
   reserveRatio: number;
@@ -94,6 +98,18 @@ export interface MmConfig {
   // Protective sell
   /** Max loss from entry price for protective SELL (e.g. 0.005 = -0.5%) */
   protectiveSellSpread: number;
+
+  // Trailing stop (Livermore)
+  /** Hard stop loss: sell if price drops this fraction below entry (e.g. 0.02 = -2%) */
+  trailingStopLoss: number;
+  /** Activation threshold: trailing stop activates when price rises this fraction above entry */
+  trailingActivation: number;
+  /** Trailing distance: sell if price drops this fraction below peak */
+  trailingDistance: number;
+
+  // Single-sided quoting
+  /** Only place BUY on one token per market (cheaper token, 1/3 reward but half fill risk) */
+  singleSided: boolean;
 }
 
 // ---- Market ----------------------------------------------------------------
@@ -172,6 +188,8 @@ export interface Position {
   avgEntry: number;
   /** Realized P&L from closed portion */
   realizedPnl: number;
+  /** Trailing stop: highest price since entry (high watermark) */
+  trailingPeak?: number;
 }
 
 // ---- Risk ------------------------------------------------------------------
@@ -191,6 +209,8 @@ export interface MmState {
   running: boolean;
   startedAt: number | null;
   capital: number;
+  /** High watermark balance for drawdown calculation */
+  peakBalance: number;
   dailyPnl: number;
   dailyDate: string; // YYYY-MM-DD
   totalPnl: number;

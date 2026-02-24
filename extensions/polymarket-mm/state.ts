@@ -24,6 +24,7 @@ function defaultState(): MmState {
     running: false,
     startedAt: null,
     capital: 0,
+    peakBalance: 0,
     dailyPnl: 0,
     dailyDate: todayUTC(),
     totalPnl: 0,
@@ -82,6 +83,11 @@ export class StateManager {
   /** Update state with partial patch. */
   update(patch: Partial<MmState>): void {
     Object.assign(this.state, patch);
+    this.dirty = true;
+  }
+
+  /** Mark state as dirty (for in-place mutations like position.trailingPeak). */
+  markDirty(): void {
     this.dirty = true;
   }
 

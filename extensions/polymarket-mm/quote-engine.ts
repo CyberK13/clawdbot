@@ -75,19 +75,35 @@ export class QuoteEngine {
     const quotes: TargetQuote[] = [];
     const v = market.rewardsMaxSpread;
 
-    // Q_min balanced allocation: distribute combined budget proportionally
-    // to token prices so both sides get similar share counts.
-    // This maximizes Q_min = min(Q_one, Q_two) for extreme price markets.
+    // Single-sided mode: only quote on the cheaper token (more shares per $ = higher score).
+    // Gets 1/3 reward but halves fill risk. When mid is extreme (<0.10 or >0.90),
+    // single-sided = 0 reward, so fall back to two-sided.
+    let tokensToQuote = market.tokens;
+    if (this.config.singleSided && market.tokens.length === 2) {
+      const [t0, t1] = market.tokens;
+      const mid0 = books.get(t0.tokenId)?.midpoint ?? t0.price;
+      const mid1 = books.get(t1.tokenId)?.midpoint ?? t1.price;
+      const yesMid = t0.outcome === "Yes" ? mid0 : mid1;
+      // Extreme prices MUST be two-sided (Q_min = min(Q1,Q2) = 0 if single-sided)
+      if (yesMid >= 0.1 && yesMid <= 0.9) {
+        tokensToQuote = [mid0 <= mid1 ? t0 : t1];
+      }
+    }
+
+    // Q_min balanced allocation (used for two-sided mode)
     const tokenBudgets = this.calculateTokenBudgets(market, books, sizeFactor);
 
-    for (const token of market.tokens) {
+    for (const token of tokensToQuote) {
       const book = books.get(token.tokenId);
       if (!book) {
         this.logger.warn(`No book for ${token.tokenId} (${token.outcome})`);
         continue;
       }
 
-      const budget = tokenBudgets.get(token.tokenId) ?? this.config.orderSize * sizeFactor;
+      // Single-sided: use standard per-token budget (not 2×)
+      const budget = this.config.singleSided
+        ? this.config.orderSize * sizeFactor
+        : (tokenBudgets.get(token.tokenId) ?? this.config.orderSize * sizeFactor);
       const tokenQuotes = this.generateTokenQuotes(market, token.tokenId, book, v, budget);
       if (tokenQuotes.length === 0) {
         this.logger.warn(

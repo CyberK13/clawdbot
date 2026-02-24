@@ -5,11 +5,11 @@
 import type { MmConfig } from "./types.js";
 
 export const DEFAULT_CONFIG: MmConfig = {
-  // Capital — aggressive single-market strategy, full capital deployment
-  // $238 balance → deploy nearly all into highest-reward market
-  totalCapital: 238,
-  maxCapitalPerMarket: 235, // near-full deployment
-  reserveRatio: 0.02, // minimal 2% reserve ($~5 buffer)
+  // Capital — dynamic from balance, no hardcoded amounts
+  deployRatio: 0.95, // 95% of balance for per-market deployment
+  orderSizeRatio: 0.475, // 47.5% of balance per-token (~half: YES + NO each)
+  maxCapitalPerMarket: 0, // computed at runtime: balance × deployRatio
+  reserveRatio: 0.02, // minimal 2% reserve
 
   // Quoting — dynamic spread ratios (fraction of market's maxSpread)
   defaultSpreadRatio: 0.35, // default 35% of maxSpread → highest S(v,s) score
@@ -19,7 +19,7 @@ export const DEFAULT_CONFIG: MmConfig = {
   defaultSpread: 0.01,
   minSpread: 0.01,
   maxSpread: 0.05,
-  orderSize: 115, // ~half of capital: YES + NO each get ~$115 ≈ $230 total
+  orderSize: 0, // computed at runtime: balance × orderSizeRatio
   numLevels: 1, // single level concentrate capital for max score
   refreshIntervalMs: 10_000, // 10s faster refresh
 
@@ -28,7 +28,7 @@ export const DEFAULT_CONFIG: MmConfig = {
   skewFactor: 0.5,
 
   // Risk — relaxed for full-capital deployment
-  maxTotalExposure: 230, // ~97% of capital
+  maxTotalExposure: 0, // computed at runtime: balance × deployRatio
   maxDrawdownPercent: 30, // generous room for MM variance
   maxDailyLoss: 30, // aligned with drawdown
 
@@ -73,6 +73,14 @@ export const DEFAULT_CONFIG: MmConfig = {
 
   // Protective sell
   protectiveSellSpread: 0.005, // max -0.5% from entry for protective SELL
+
+  // Trailing stop (Livermore) — simple exit system
+  trailingStopLoss: 0.02, // -2% from entry → hard stop, immediate market sell
+  trailingActivation: 0.01, // +1% from entry → activate trailing stop
+  trailingDistance: 0.01, // -1% from peak → trailing stop sell
+
+  // Two-sided quoting with cancel-on-fill: earn 3× reward, cancel other side on fill
+  singleSided: false, // false = two-sided (cancel other side on fill)
 };
 
 /** Merge user overrides onto defaults, validating ranges. */
@@ -80,8 +88,8 @@ export function resolveConfig(overrides?: Partial<MmConfig>): MmConfig {
   const cfg = { ...DEFAULT_CONFIG, ...overrides };
 
   // Clamp / sanity checks
-  cfg.totalCapital = Math.max(0, cfg.totalCapital);
-  cfg.maxCapitalPerMarket = Math.min(cfg.maxCapitalPerMarket, cfg.totalCapital);
+  cfg.deployRatio = clamp(cfg.deployRatio, 0.5, 1.0);
+  cfg.orderSizeRatio = clamp(cfg.orderSizeRatio, 0.1, 0.5);
   cfg.reserveRatio = clamp(cfg.reserveRatio, 0, 0.5);
   cfg.defaultSpreadRatio = clamp(cfg.defaultSpreadRatio, 0.1, 0.9);
   cfg.minSpreadRatio = clamp(cfg.minSpreadRatio, 0.1, cfg.defaultSpreadRatio);
@@ -131,6 +139,11 @@ export function resolveConfig(overrides?: Partial<MmConfig>): MmConfig {
   // Protective sell
   cfg.protectiveSellSpread = clamp(cfg.protectiveSellSpread, 0.001, 0.05);
 
+  // Trailing stop
+  cfg.trailingStopLoss = clamp(cfg.trailingStopLoss, 0.005, 0.1);
+  cfg.trailingActivation = clamp(cfg.trailingActivation, 0.005, 0.1);
+  cfg.trailingDistance = clamp(cfg.trailingDistance, 0.005, 0.1);
+
   return cfg;
 }
 
@@ -141,12 +154,12 @@ function clamp(v: number, min: number, max: number): number {
 /** Format config for Telegram display */
 export function formatConfig(cfg: MmConfig): string {
   const lines = [
-    `💰 资金: $${cfg.totalCapital} (单市场 $${cfg.maxCapitalPerMarket}, 预留 ${(cfg.reserveRatio * 100).toFixed(0)}%)`,
+    `💰 资金: 动态(余额×${(cfg.deployRatio * 100).toFixed(0)}%), 单笔=${(cfg.orderSizeRatio * 100).toFixed(1)}%余额, 预留=${(cfg.reserveRatio * 100).toFixed(0)}%`,
     `📊 报价: spreadRatio=${cfg.defaultSpreadRatio} [${cfg.minSpreadRatio}-${cfg.maxSpreadRatio}], size=$${cfg.orderSize}, levels=${cfg.numLevels}, volW=${cfg.volatilityWeight}, invP=${cfg.inventorySpreadPenalty}`,
     `🔄 刷新: ${cfg.refreshIntervalMs / 1000}s`,
     `📦 库存: max=$${cfg.maxInventoryPerMarket}, skew=${cfg.skewFactor}`,
     `🛡️ 风控: exposure=$${cfg.maxTotalExposure}, drawdown=${cfg.maxDrawdownPercent}%, dailyLoss=$${cfg.maxDailyLoss}`,
-    `🔧 恢复: timeout=${cfg.fillRecoveryTimeoutMs / 1000}s, softSell=${(cfg.maxExposureForSoftSell * 100).toFixed(0)}%, hardSell=${(cfg.maxExposureForHardSell * 100).toFixed(0)}%`,
+    `📉 止损: 硬止损=${(cfg.trailingStopLoss * 100).toFixed(1)}%, 激活=${(cfg.trailingActivation * 100).toFixed(1)}%, 追踪=${(cfg.trailingDistance * 100).toFixed(1)}%, 单边=${cfg.singleSided}`,
     `🏪 市场: max=${cfg.maxConcurrentMarkets}, minReward=$${cfg.minRewardRate}`,
   ];
   return lines.join("\n");
