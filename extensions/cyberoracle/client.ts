@@ -7,10 +7,15 @@ import type { ApiResponse, ChatResponse } from "./types.js";
 type Params = Record<string, string | number | boolean | undefined>;
 
 export class CyberOracleClient {
+  private readonly base: string;
+
   constructor(
-    private baseUrl: string,
+    baseUrl: string,
     private apiKey: string,
-  ) {}
+  ) {
+    // Ensure trailing slash so relative URL resolution works correctly
+    this.base = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
+  }
 
   // ---- internal helpers ---------------------------------------------------
 
@@ -19,7 +24,9 @@ export class CyberOracleClient {
     path: string,
     opts?: { params?: Params; body?: unknown },
   ): Promise<ApiResponse<T>> {
-    const url = new URL(path, this.baseUrl);
+    // Strip leading slash so path is relative to base (not origin)
+    const rel = path.startsWith("/") ? path.slice(1) : path;
+    const url = new URL(rel, this.base);
     if (opts?.params) {
       for (const [k, v] of Object.entries(opts.params)) {
         if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
