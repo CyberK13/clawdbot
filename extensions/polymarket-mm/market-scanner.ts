@@ -210,10 +210,12 @@ export class MarketScanner {
       competition = this.measureCompetition(book, mid, maxSpreadPrice);
 
       // Fix 1: Reject thin markets where exit would cause massive slippage
+      // Dynamic floor: at least 3× orderSize so we're never >33% of bid book
       const bidDepthUsd = this.measureBidDepthUsd(book);
-      if (bidDepthUsd < this.config.minBidDepthUsd) {
+      const minDepth = Math.max(this.config.minBidDepthUsd, this.config.orderSize * 3);
+      if (bidDepthUsd < minDepth) {
         this.logger.info(
-          `Skipping ${cand.condition_id.slice(0, 16)}: bid depth $${bidDepthUsd.toFixed(0)} < min $${this.config.minBidDepthUsd}`,
+          `Skipping ${cand.condition_id.slice(0, 16)}: bid depth $${bidDepthUsd.toFixed(0)} < min $${minDepth.toFixed(0)} (3×orderSize=$${(this.config.orderSize * 3).toFixed(0)})`,
         );
         return null;
       }
