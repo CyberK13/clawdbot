@@ -371,8 +371,11 @@ export class MmEngine {
           `[tick ${this.tickCount}] Refreshing quotes for ${this.activeMarkets.length} markets (books: ${this.books.size})`,
         );
         await this.refreshAllQuotes();
-        const totalOrders = Object.keys(this.stateMgr.get().trackedOrders || {}).length;
-        this.logger.info(`[tick ${this.tickCount}] After refresh: ${totalOrders} tracked orders`);
+        const allOrders = Object.values(this.stateMgr.get().trackedOrders || {});
+        const liveOrders = allOrders.filter((o) => o.status === "live").length;
+        this.logger.info(
+          `[tick ${this.tickCount}] After refresh: ${liveOrders} live orders (${allOrders.length} total tracked)`,
+        );
       }
 
       // --- Every 6 ticks (30s): opportunistic trades ---

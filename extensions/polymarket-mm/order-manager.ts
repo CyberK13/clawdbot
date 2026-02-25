@@ -78,11 +78,13 @@ export class OrderManager {
   /** Place a single limit order. BUY uses GTD (auto-expire) for crash protection. */
   async placeOrder(market: MmMarket, target: TargetQuote): Promise<TrackedOrder | null> {
     try {
-      // BUY orders use GTD with 60s expiry — prevents stale buys during crashes
+      // BUY orders use GTD with 5min expiry — crash protection without reward gaps.
+      // 60s GTD caused 15s scoring gaps every cycle (16-25% reward loss).
+      // 5min GTD: refresh every 15s keeps orders fresh, only expire if bot crashes.
       const isBuy = target.side === "BUY";
       const orderType = isBuy ? OrderType.GTD : OrderType.GTC;
       const expiration = isBuy
-        ? Math.floor(Date.now() / 1000) + 60 + 60 // API has 60s security buffer, so +60+60 = 60s effective lifetime
+        ? Math.floor(Date.now() / 1000) + 60 + 300 // API has 60s security buffer, so +60+300 = 5min effective lifetime
         : undefined;
 
       const result = await this.client.createAndPostOrder(
@@ -155,7 +157,7 @@ export class OrderManager {
       try {
         const isBuy = target.side === "BUY";
         const orderType = isBuy ? OrderType.GTD : OrderType.GTC;
-        const expiration = isBuy ? Math.floor(Date.now() / 1000) + 60 + 60 : undefined;
+        const expiration = isBuy ? Math.floor(Date.now() / 1000) + 60 + 300 : undefined;
 
         const signedOrder = await this.client.createOrder(
           {
