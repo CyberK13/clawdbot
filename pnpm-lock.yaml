@@ -72,8 +72,8 @@ importers:
         specifier: ^0.1.89
         version: 0.1.92
       '@polymarket/clob-client':
-        specifier: ^5.2.1
-        version: 5.2.4(typescript@5.9.3)(zod@4.3.6)
+        specifier: 5.2.1
+        version: 5.2.1(typescript@5.9.3)(zod@4.3.6)
       '@sinclair/typebox':
         specifier: 0.34.48
         version: 0.34.48
@@ -2445,8 +2445,8 @@ packages:
   '@polymarket/builder-signing-sdk@0.0.8':
     resolution: {integrity: sha512-rZLCFxEdYahl5FiJmhe22RDXysS1ibFJlWz4NT0s3itJRYq3XJzXXHXEZkAQplU+nIS1IlbbKjA4zDQaeCyYtg==}
 
-  '@polymarket/clob-client@5.2.4':
-    resolution: {integrity: sha512-kBTEEHNE111FmD4NKcHwRIL7DmCYqIu1iHTpbkUrwh08cjUSuz4caFUAYbyKiVFmyknSUblKmcAZnNdbY+KV5Q==}
+  '@polymarket/clob-client@5.2.1':
+    resolution: {integrity: sha512-ZAYzCiPbAATcocUg2Uh+ZuktpQcyMZXyRWvV4w0mCXQy46qHYCgLoQBWEWDFEcQpkteqf9cEngOcr31tjMuuBg==}
     engines: {node: '>=20.10'}
 
   '@polymarket/order-utils@3.0.1':
@@ -8413,7 +8413,7 @@ snapshots:
     transitivePeerDependencies:
       - debug
 
-  '@polymarket/clob-client@5.2.4(typescript@5.9.3)(zod@4.3.6)':
+  '@polymarket/clob-client@5.2.1(typescript@5.9.3)(zod@4.3.6)':
     dependencies:
       '@ethersproject/providers': 5.8.0
       '@ethersproject/units': 5.8.0

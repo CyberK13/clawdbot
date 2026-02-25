@@ -67,14 +67,11 @@ export class OrderManager {
       }
     }
 
-    // Place new orders for unmatched targets — batch when possible
+    // Place new orders for unmatched targets — always use individual path
+    // (batch createOrder+postOrders has signing issues; createAndPostOrder is proven)
     const toPlace = targets.filter((_, idx) => !matched.has(`${idx}`));
-    if (toPlace.length > 1) {
-      await this.placeOrdersBatch(market, toPlace);
-    } else {
-      for (const target of toPlace) {
-        await this.placeOrder(market, target);
-      }
+    for (const target of toPlace) {
+      await this.placeOrder(market, target);
     }
   }
 
