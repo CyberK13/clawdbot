@@ -41,7 +41,13 @@ function defaultState(): MmState {
     dayPaused: false,
     rewardHistory: [],
     fillHistory: [],
-    spreadState: { currentRatio: 0.35, fillsPerHour: {}, lastAdjustedAt: 0, volatility: {} },
+    spreadState: {
+      currentRatio: 0.35,
+      ratioOverrides: {},
+      fillsPerHour: {},
+      lastAdjustedAt: 0,
+      volatility: {},
+    },
   };
 }
 
@@ -109,6 +115,19 @@ export class StateManager {
       this.state.dailyPnl = 0;
       this.state.dailyDate = today;
       this.state.dayPaused = false;
+
+      // Clean up closed positions (netShares=0) to prevent state bloat
+      let cleaned = 0;
+      for (const [tokenId, pos] of Object.entries(this.state.positions)) {
+        if (pos.netShares === 0) {
+          delete this.state.positions[tokenId];
+          cleaned++;
+        }
+      }
+      if (cleaned > 0) {
+        this.logger.info(`Day roll: cleaned ${cleaned} closed positions`);
+      }
+
       this.dirty = true;
       return true;
     }

@@ -77,10 +77,11 @@ export class SpreadController {
     // Combine factors
     let spreadRatio = baseRatio + volAdjust + invPenalty + extremeAdjust;
 
-    // Check for widen_spread override from risk controller
+    // Check for per-market widen_spread override from risk controller
     const spreadState = this.state.get().spreadState;
-    if (spreadState?.currentRatio > spreadRatio) {
-      spreadRatio = spreadState.currentRatio;
+    const marketOverride = spreadState?.ratioOverrides?.[conditionId] ?? 0;
+    if (marketOverride > spreadRatio) {
+      spreadRatio = marketOverride;
     }
 
     // Clamp to configured bounds
@@ -96,7 +97,7 @@ export class SpreadController {
 
     const result = clamp(spread, floor, ceiling);
 
-    this.logger.info(
+    (this.logger.debug ?? this.logger.info)(
       `Spread: ${conditionId.slice(0, 10)} fills/hr=${fillsPerHour.toFixed(1)} ` +
         `base=${baseRatio.toFixed(2)} vol=${volAdjust.toFixed(3)} inv=${invPenalty.toFixed(3)} ` +
         `ext=${extremeAdjust.toFixed(2)} ratio=${spreadRatio.toFixed(3)} ` +
@@ -127,6 +128,7 @@ export class SpreadController {
       spreadState: {
         ...st.spreadState,
         currentRatio: st.spreadState?.currentRatio ?? this.config.defaultSpreadRatio,
+        ratioOverrides: st.spreadState?.ratioOverrides ?? {},
         fillsPerHour: st.spreadState?.fillsPerHour ?? {},
         lastAdjustedAt: st.spreadState?.lastAdjustedAt ?? Date.now(),
         volatility: volRecord,
@@ -147,12 +149,15 @@ export class SpreadController {
    */
   widenSpread(conditionId: string, factor: number): void {
     const st = this.state.get();
-    const current = st.spreadState?.currentRatio || this.config.defaultSpreadRatio;
+    const overrides = { ...(st.spreadState?.ratioOverrides ?? {}) };
+    const current = overrides[conditionId] || this.config.defaultSpreadRatio;
     const widened = Math.min(current * factor, this.config.maxSpreadRatio);
+    overrides[conditionId] = widened;
     this.state.update({
       spreadState: {
         ...st.spreadState,
-        currentRatio: widened,
+        currentRatio: st.spreadState?.currentRatio ?? this.config.defaultSpreadRatio,
+        ratioOverrides: overrides,
         lastAdjustedAt: Date.now(),
       },
     });
@@ -169,49 +174,52 @@ export class SpreadController {
     const st = this.state.get();
     if (!st.spreadState) return;
 
-    // Guard against NaN in persisted state (reset to default)
-    if (isNaN(st.spreadState.currentRatio)) {
-      this.state.update({
-        spreadState: {
-          ...st.spreadState,
-          currentRatio: this.config.defaultSpreadRatio,
-          lastAdjustedAt: Date.now(),
-        },
-      });
-      this.logger.info("Spread state had NaN ratio, reset to default");
-      return;
-    }
-
-    if (st.spreadState.currentRatio <= this.config.defaultSpreadRatio) return;
+    const overrides = st.spreadState.ratioOverrides ?? {};
+    const keys = Object.keys(overrides);
+    if (keys.length === 0) return;
 
     const elapsed = Date.now() - st.spreadState.lastAdjustedAt;
     if (elapsed < 60_000) return; // wait at least 1 minute
 
-    // Gradual decay: halve the excess every 5 minutes
     const decayRate = Math.pow(0.5, elapsed / (5 * 60_000));
-    const excess = st.spreadState.currentRatio - this.config.defaultSpreadRatio;
-    const decayedExcess = excess * decayRate;
+    const newOverrides: Record<string, number> = {};
+    let changed = false;
 
-    // Snap to default when close enough
-    const newRatio =
-      decayedExcess < 0.01
-        ? this.config.defaultSpreadRatio
-        : this.config.defaultSpreadRatio + decayedExcess;
+    for (const conditionId of keys) {
+      const current = overrides[conditionId];
+      if (isNaN(current) || current <= this.config.defaultSpreadRatio) {
+        // Already at or below default — remove override
+        changed = true;
+        continue;
+      }
 
-    this.state.update({
-      spreadState: {
-        ...st.spreadState,
-        currentRatio: newRatio,
-        lastAdjustedAt: Date.now(),
-      },
-    });
+      const excess = current - this.config.defaultSpreadRatio;
+      const decayedExcess = excess * decayRate;
 
-    if (newRatio <= this.config.defaultSpreadRatio) {
-      this.logger.info("Spread override decayed back to default");
-    } else {
-      this.logger.info(
-        `Spread override decaying: ${st.spreadState.currentRatio.toFixed(3)} → ${newRatio.toFixed(3)}`,
-      );
+      if (decayedExcess < 0.01) {
+        // Snap to default — remove override
+        changed = true;
+        this.logger.info(`Spread override decayed: ${conditionId.slice(0, 10)} → default`);
+      } else {
+        const newRatio = this.config.defaultSpreadRatio + decayedExcess;
+        newOverrides[conditionId] = newRatio;
+        if (Math.abs(newRatio - current) > 0.001) {
+          changed = true;
+          this.logger.info(
+            `Spread override decaying: ${conditionId.slice(0, 10)} ${current.toFixed(3)} → ${newRatio.toFixed(3)}`,
+          );
+        }
+      }
+    }
+
+    if (changed) {
+      this.state.update({
+        spreadState: {
+          ...st.spreadState,
+          ratioOverrides: newOverrides,
+          lastAdjustedAt: Date.now(),
+        },
+      });
     }
   }
 }

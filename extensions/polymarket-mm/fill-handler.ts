@@ -209,8 +209,9 @@ export class FillHandler {
     const pending = this.state.getPendingSells();
 
     for (const [tokenId, ps] of Object.entries(pending)) {
-      // Retry every 15s
-      if (now - ps.lastAttemptAt < 15_000) continue;
+      // Respect explicit nextRetryAt (e.g. no_bids backoff), else retry every 15s
+      if (ps.nextRetryAt && now < ps.nextRetryAt) continue;
+      if (!ps.nextRetryAt && now - ps.lastAttemptAt < 15_000) continue;
 
       const pos = this.state.getPosition(tokenId);
       if (!pos || pos.netShares <= 0) {
@@ -243,10 +244,11 @@ export class FillHandler {
       } else {
         ps.retryCount++;
         ps.lastAttemptAt = now;
+        ps.nextRetryAt = undefined;
 
         // No bids = illiquid market, wait longer
         if (result === "no_bids") {
-          ps.lastAttemptAt = now + 120_000;
+          ps.nextRetryAt = now + 120_000;
 
           // After 3+ consecutive no_bids, check if market resolved → auto-redeem
           if (ps.retryCount >= 3 && this.redeemCallback) {
@@ -263,13 +265,7 @@ export class FillHandler {
   /**
    * Public forceSell wrapper for engine liquidation / orphan selling.
    */
-  async forceSellPublic(
-    tokenId: string,
-    conditionId: string,
-    shares: number,
-    _pendingSellAge = 0,
-    _forceEmergency = false,
-  ): Promise<boolean> {
+  async forceSellPublic(tokenId: string, conditionId: string, shares: number): Promise<boolean> {
     const result = await this.forceSell(tokenId, conditionId, shares);
     return result === "success" || result === "partial";
   }
@@ -364,9 +360,10 @@ export class FillHandler {
       const pos = this.state.getPosition(tokenId);
       const sharesBefore = pos?.netShares ?? shares;
 
-      // FAK sell with settle retry (tokens need ~5s to arrive after BUY fill)
+      // FAK sell with settle retry (tokens need ~5-10s to arrive after BUY fill)
+      const MAX_SETTLE_RETRIES = 3;
       let sellAttempts = 0;
-      while (sellAttempts < 2) {
+      while (sellAttempts < MAX_SETTLE_RETRIES) {
         try {
           await this.client.createAndPostOrder(
             {
@@ -384,10 +381,12 @@ export class FillHandler {
         } catch (sellErr: any) {
           sellAttempts++;
           if (
-            sellAttempts < 2 &&
+            sellAttempts < MAX_SETTLE_RETRIES &&
             (sellErr.message?.includes("balance") || sellErr.message?.includes("allowance"))
           ) {
-            this.logger.warn(`Force sell ${tokenId.slice(0, 10)}: tokens settling, retry in 5s`);
+            this.logger.warn(
+              `Force sell ${tokenId.slice(0, 10)}: tokens settling, retry ${sellAttempts}/${MAX_SETTLE_RETRIES} in 5s`,
+            );
             await new Promise((r) => setTimeout(r, 5_000));
             continue;
           }

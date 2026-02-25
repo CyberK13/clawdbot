@@ -600,12 +600,16 @@ export class MmEngine {
         continue;
       }
 
-      // Skip markets with active positions — holding mode, trailing stop manages exit
-      const hasPosition = market.tokens.some((t) => {
+      // Skip markets with significant positions — holding mode, trailing stop manages exit
+      // Small partial fills (< $5 value) don't justify stopping reward-earning quotes
+      const MIN_POSITION_VALUE = 5;
+      const hasSignificantPosition = market.tokens.some((t) => {
         const pos = this.stateMgr.getPosition(t.tokenId);
-        return pos && pos.netShares > 0;
+        if (!pos || pos.netShares <= 0) return false;
+        const mid = this.priceMap.get(t.tokenId) ?? pos.avgEntry;
+        return pos.netShares * mid >= MIN_POSITION_VALUE;
       });
-      if (hasPosition) continue;
+      if (hasSignificantPosition) continue;
 
       const quotes = this.quoteEngine.generateQuotes(market, this.books, sizeFactor);
       this.currentQuotes.set(market.conditionId, quotes);
@@ -777,8 +781,6 @@ export class MmEngine {
         pos.tokenId,
         pos.conditionId,
         pos.netShares,
-        0,
-        true, // forceEmergency: bypass price floor on kill switch
       );
       if (ok) {
         success++;
@@ -973,25 +975,33 @@ export class MmEngine {
       `Redeeming ${totalShares.toFixed(2)} shares for condition ${conditionId.slice(0, 16)}...`,
     );
 
+    // Snapshot USDC balance before redemption
+    const balanceBefore = await this.client.getBalance();
+
     // Call CTF redeemPositions (both YES and NO index sets)
     const txHash = await this.client.redeemPositions(conditionId, [1, 2]);
 
-    // Update state: zero out the positions after redemption
+    // Refresh balance and compute actual redemption proceeds
+    this.cachedBalance = await this.client.getBalance();
+    const actualProceeds = Math.max(0, this.cachedBalance - balanceBefore);
+    const effectivePrice = totalShares > 0 ? actualProceeds / totalShares : 0;
+
+    this.logger.info(
+      `Redemption proceeds: $${actualProceeds.toFixed(2)} (effective price=${effectivePrice.toFixed(4)})`,
+    );
+
+    // Update state: zero out the positions using actual effective price
     for (const pos of positions) {
-      const price = 1.0; // resolved winning token redeems at $1
-      const pnl = pos.netShares * (price - pos.avgEntry);
       this.stateMgr.updatePosition(
         pos.tokenId,
         pos.conditionId,
         pos.outcome,
         pos.netShares,
-        price,
+        effectivePrice,
         "SELL",
       );
     }
 
-    // Refresh balance and resize
-    this.cachedBalance = await this.client.getBalance();
     this.adjustSizingToBalance(this.cachedBalance);
     this.stateMgr.forceSave();
 

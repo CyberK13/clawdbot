@@ -257,12 +257,14 @@ export class OrderManager {
       }
 
       for (const tracked of trackedOrders) {
+        // Skip orders already processed by WS feed (filled or cancelled)
         if (tracked.status !== "live") continue;
 
         const onExchange = openOrders.find((o) => o.id === tracked.orderId);
 
         if (!onExchange) {
-          // Order disappeared — verify with trades
+          // Order disappeared — check remaining unfilled portion
+          // WS may have already updated filledSize via partial fills
           const fillSize = tracked.originalSize - tracked.filledSize;
 
           if (fillSize > 0 && recentTrades !== null) {
@@ -345,9 +347,10 @@ export class OrderManager {
 
           this.state.trackOrder(tracked); // update status
         } else {
-          // Check for partial fills
+          // Check for partial fills — use exchange's size_matched as source of truth.
+          // WS may have already updated tracked.filledSize, so only report the delta.
           const sizeMatched = parseFloat(onExchange.size_matched || "0");
-          if (sizeMatched > tracked.filledSize) {
+          if (sizeMatched > tracked.filledSize + 0.001) {
             const newFill = sizeMatched - tracked.filledSize;
             fills.push({ order: tracked, fillSize: newFill });
             tracked.filledSize = sizeMatched;

@@ -272,11 +272,13 @@ export interface RewardScore {
 // ---- Spread controller state -----------------------------------------------
 
 export interface SpreadState {
-  /** Current spread ratio (0.20 - 0.80 of maxSpread) */
+  /** @deprecated Use ratioOverrides per market. Kept for state migration. */
   currentRatio: number;
+  /** Per-market spread ratio overrides from widen_spread risk action */
+  ratioOverrides: Record<string, number>;
   /** Fills in the last hour per market */
   fillsPerHour: Record<string, number>;
-  /** Timestamp of last adjustment */
+  /** Timestamp of last adjustment per market */
   lastAdjustedAt: number;
   /** Realized volatility per market (5min window) */
   volatility: Record<string, number>;
@@ -304,6 +306,8 @@ export interface PendingSell {
   sellOrderId?: string; // limit SELL order ID if placed
   retryCount: number;
   lastAttemptAt: number;
+  /** Earliest time to retry (overrides lastAttemptAt for long delays like no_bids) */
+  nextRetryAt?: number;
   /** Split progression: 1.0 → 0.5 → 0.25 → 0.10 of original shares */
   splitFactor: number;
   /** Midpoint at the time of the fill that created this pending sell */
