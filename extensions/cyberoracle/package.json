@@ -1,0 +1,15 @@
+{
+  "name": "@openclaw/cyberoracle",
+  "version": "2026.2.25",
+  "private": true,
+  "description": "CyberOracle V3 — global market intelligence, AI analysis & trading",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

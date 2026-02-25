@@ -1,0 +1,10 @@
+{
+  "id": "cyberoracle",
+  "name": "CyberOracle V3",
+  "description": "Global market intelligence, AI analysis, and trading via CyberOracle V3 API",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
