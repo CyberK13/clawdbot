@@ -208,6 +208,15 @@ export class MarketScanner {
 
       const mid = this.midFromBook(book);
       competition = this.measureCompetition(book, mid, maxSpreadPrice);
+
+      // Fix 1: Reject thin markets where exit would cause massive slippage
+      const bidDepthUsd = this.measureBidDepthUsd(book);
+      if (bidDepthUsd < this.config.minBidDepthUsd) {
+        this.logger.info(
+          `Skipping ${cand.condition_id.slice(0, 16)}: bid depth $${bidDepthUsd.toFixed(0)} < min $${this.config.minBidDepthUsd}`,
+        );
+        return null;
+      }
     } catch {
       // Default high competition: penalize markets with unknown orderbooks
       competition = 500;
@@ -258,6 +267,15 @@ export class MarketScanner {
       score,
       active: true,
     };
+  }
+
+  /** Sum all bids' price×size to get total USD depth available on exit. */
+  private measureBidDepthUsd(book: any): number {
+    let depth = 0;
+    for (const bid of book.bids || []) {
+      depth += parseFloat(bid.price) * parseFloat(bid.size);
+    }
+    return depth;
   }
 
   private midFromBook(book: any): number {

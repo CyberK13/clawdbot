@@ -40,6 +40,7 @@ export const DEFAULT_CONFIG: MmConfig = {
   maxConcurrentMarkets: 1, // concentrate capital in 1 market for max score
   minDailyVolume: 100, // lower threshold to not miss markets
   minRewardRate: 50, // target $50+/day markets (worth the capital)
+  minBidDepthUsd: 200, // at least $200 bid depth to ensure safe exit
 
   // Fill recovery
   fillRecoveryTimeoutMs: 300_000, // 5 minutes before force sell
@@ -107,6 +108,7 @@ export function resolveConfig(overrides?: Partial<MmConfig>): MmConfig {
   cfg.deviationThreshold = clamp(cfg.deviationThreshold, 0.01, 1);
   cfg.opportunisticSize = Math.max(1, cfg.opportunisticSize);
   cfg.maxConcurrentMarkets = clamp(cfg.maxConcurrentMarkets, 1, 50);
+  cfg.minBidDepthUsd = Math.max(0, cfg.minBidDepthUsd);
   cfg.fillRecoveryTimeoutMs = Math.max(60_000, cfg.fillRecoveryTimeoutMs);
   cfg.maxExposureForSoftSell = clamp(cfg.maxExposureForSoftSell, 0.1, 0.5);
   cfg.maxExposureForHardSell = clamp(cfg.maxExposureForHardSell, cfg.maxExposureForSoftSell, 0.9);

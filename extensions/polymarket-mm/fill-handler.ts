@@ -6,8 +6,8 @@
 //   2. Trailing activation: price rises >1% above entry
 //   3. Trailing stop: price drops >1% from peak → market sell
 //
-// All sells are FAK @ bestBid (pure market sells, no floor protection).
-// We're earning rewards, not betting — minimize loss exposure.
+// All sells are FAK @ bestBid with price floor protection (entry × minSellPriceRatio).
+// Hard stop has 30s cooldown after BUY fill to avoid false triggers from book repricing.
 // ---------------------------------------------------------------------------
 
 import { OrderType, Side } from "@polymarket/clob-client";
@@ -26,6 +26,8 @@ export class FillHandler {
   private riskController: RiskController | null = null;
   /** Callback to engine for auto-redeeming resolved market positions. */
   private redeemCallback: ((conditionId: string) => Promise<void>) | null = null;
+  /** Timestamp of last BUY fill — hard stop cooldown (Fix 3). */
+  private lastBuyFillAt = 0;
 
   constructor(
     private client: PolymarketClient,
@@ -114,6 +116,9 @@ export class FillHandler {
     };
     this.state.recordFill(fillEvent);
 
+    // Record buy fill time for hard stop cooldown (Fix 3)
+    if (order.side === "BUY") this.lastBuyFillAt = Date.now();
+
     if (!market) return;
 
     // Initialize trailing peak on position
@@ -174,8 +179,14 @@ export class FillHandler {
       const activationPrice = entry * (1 + this.config.trailingActivation);
       const trailingStopPrice = pos.trailingPeak * (1 - this.config.trailingDistance);
 
-      // 1. Hard stop loss
+      // 1. Hard stop loss (with 30s cooldown after BUY fill — Fix 3)
       if (currentMid <= hardStopPrice) {
+        const HARD_STOP_COOLDOWN_MS = 30_000;
+        const sinceFill = Date.now() - this.lastBuyFillAt;
+        if (sinceFill < HARD_STOP_COOLDOWN_MS) {
+          // Cooldown: book is still repricing after our fill, skip hard stop
+          continue;
+        }
         this.logger.warn(
           `🔴 硬止损: ${pos.outcome} ${pos.netShares.toFixed(1)} shares ` +
             `mid=${currentMid.toFixed(4)} <= stop=${hardStopPrice.toFixed(4)} ` +
@@ -246,12 +257,16 @@ export class FillHandler {
         ps.lastAttemptAt = now;
         ps.nextRetryAt = undefined;
 
-        // No bids = illiquid market, wait longer
+        // Fix 4: Exponential backoff for no_bids: 30s → 60s → 120s → 240s (capped)
         if (result === "no_bids") {
-          ps.nextRetryAt = now + 120_000;
+          const backoff = Math.min(240_000, 30_000 * Math.pow(2, Math.min(ps.retryCount, 3)));
+          ps.nextRetryAt = now + backoff;
+          this.logger.warn(
+            `No bids for ${tokenId.slice(0, 10)}, retry #${ps.retryCount} in ${(backoff / 1000).toFixed(0)}s`,
+          );
 
-          // After 3+ consecutive no_bids, check if market resolved → auto-redeem
-          if (ps.retryCount >= 3 && this.redeemCallback) {
+          // 5 consecutive no_bids → try auto-redeem (market may be resolved)
+          if (ps.retryCount >= 4 && this.redeemCallback) {
             const redeemed = await this.tryAutoRedeem(tokenId, ps);
             if (redeemed) continue;
           }
@@ -333,8 +348,8 @@ export class FillHandler {
   }
 
   /**
-   * Market sell via FAK @ bestBid. No floor protection.
-   * Simple and direct — we're earning rewards, not betting.
+   * Market sell via FAK @ bestBid with price floor protection.
+   * Won't sell below entry × minSellPriceRatio (50%) unless emergency (>10min stuck).
    */
   private async forceSell(
     tokenId: string,
@@ -354,11 +369,29 @@ export class FillHandler {
         return "no_bids";
       }
 
-      const sellPrice = Math.max(0.01, bestBid);
+      let sellPrice = Math.max(0.01, bestBid);
       const tickSize = (book.tick_size || "0.01") as import("@polymarket/clob-client").TickSize;
       const negRisk = book.neg_risk || false;
       const pos = this.state.getPosition(tokenId);
       const sharesBefore = pos?.netShares ?? shares;
+
+      // Fix 2: Price protection — don't sell below entry × minSellPriceRatio (50%)
+      // unless pending sell has been stuck for > maxPendingSellAgeMs (emergency mode)
+      const entry = pos?.avgEntry ?? 0;
+      const ps = this.state.getPendingSells()[tokenId];
+      const age = ps ? Date.now() - ps.placedAt : 0;
+      const isEmergency = age > this.config.maxPendingSellAgeMs;
+
+      if (entry > 0 && !isEmergency) {
+        const floor = entry * this.config.minSellPriceRatio;
+        if (bestBid < floor) {
+          this.logger.warn(
+            `Force sell ${tokenId.slice(0, 10)}: bestBid ${bestBid.toFixed(3)} < floor ${floor.toFixed(3)} ` +
+              `(entry=${entry.toFixed(3)}×${this.config.minSellPriceRatio}), skipping`,
+          );
+          return "no_bids";
+        }
+      }
 
       // FAK sell with settle retry (tokens need ~5-10s to arrive after BUY fill)
       const MAX_SETTLE_RETRIES = 3;

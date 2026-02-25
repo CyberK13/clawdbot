@@ -52,6 +52,8 @@ export interface MmConfig {
   maxConcurrentMarkets: number;
   minDailyVolume: number;
   minRewardRate: number;
+  /** Minimum total bid depth (USD) in orderbook to accept a market */
+  minBidDepthUsd: number;
 
   // Fill recovery
   fillRecoveryTimeoutMs: number;
