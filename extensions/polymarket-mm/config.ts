@@ -6,8 +6,8 @@ import type { MmConfig } from "./types.js";
 
 export const DEFAULT_CONFIG: MmConfig = {
   // Capital — dynamic from balance
-  deployRatio: 0.5,
-  orderSizeRatio: 0.475,
+  deployRatio: 0.95,
+  orderSizeRatio: 0.25,
   maxCapitalPerMarket: 0, // computed at runtime
   reserveRatio: 0.02,
 
