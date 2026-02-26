@@ -496,17 +496,6 @@ export class MmEngine {
     const quotes = this.quoteEngine.generateQuotes(mkt, this.books);
     if (quotes.length === 0) return;
 
-    // P24: Debug — log quote details vs scoring requirements
-    for (const q of quotes) {
-      const book = this.books.get(q.tokenId);
-      const token = mkt.tokens.find((t) => t.tokenId === q.tokenId);
-      this.logger.info(
-        `📊 Quote: ${q.side} ${token?.outcome ?? "?"} ${q.size.toFixed(1)}@${q.price.toFixed(4)} | ` +
-          `bookMid=${book?.midpoint?.toFixed(4)} bestBid=${book?.bestBid?.toFixed(4)} bestAsk=${book?.bestAsk?.toFixed(4)} | ` +
-          `spread=${book ? Math.abs(book.midpoint - q.price).toFixed(4) : "?"} maxSpread=${mkt.rewardsMaxSpread.toFixed(4)} minSize=${mkt.rewardsMinSize}`,
-      );
-    }
-
     this.currentQuotes.set(mkt.conditionId, quotes);
     const placedIds = await this.orderMgr.refreshMarketOrders(mkt, quotes);
 

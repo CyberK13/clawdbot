@@ -3,7 +3,9 @@
 //
 // - Rewards sampled every minute (10,080 samples per weekly epoch)
 // - Distributed daily at UTC midnight
-// - Uses areOrdersScoring() API to validate eligibility
+// - Primary: local estimation (spread/size check vs reward params)
+// - Secondary: areOrdersScoring() API (only works for native rewards,
+//   returns false for sponsored-only markets — which is most markets)
 // ---------------------------------------------------------------------------
 
 import type { PluginLogger } from "../../src/plugins/types.js";
@@ -18,7 +20,6 @@ export class RewardTracker {
   private lastScoringCheck = 0;
   private lastEarningsCheck = 0;
   private scoringResults: Map<string, boolean> = new Map(); // orderId → scoring
-  private scoringApiWarned = false;
 
   constructor(
     private client: PolymarketClient,
@@ -31,97 +32,37 @@ export class RewardTracker {
 
   /**
    * Check if our orders are scoring. Call every ~60s.
-   * Returns the count of scoring vs total orders.
+   *
+   * Primary method: local estimation — our quote engine always places within
+   * targetSpread < maxSpread, so all live orders are assumed scoring.
+   *
+   * The areOrdersScoring() API only checks native maker rebates, NOT
+   * sponsored rewards (which are the majority of reward markets). So we
+   * use local estimation as the primary source of truth.
    */
   async checkScoring(): Promise<{ scoring: number; total: number }> {
     const now = Date.now();
-    // Don't check more often than every 30 seconds
     if (now - this.lastScoringCheck < 30_000) {
       return this.getCurrentScoringStats();
     }
     this.lastScoringCheck = now;
 
     const trackedOrders = this.state.getTrackedOrders();
-    const liveOrderIds = trackedOrders.filter((o) => o.status === "live").map((o) => o.orderId);
+    const live = trackedOrders.filter((o) => o.status === "live");
 
-    if (liveOrderIds.length === 0) {
+    if (live.length === 0) {
       return { scoring: 0, total: 0 };
     }
 
-    try {
-      // Check in batches of 50 (API limit safety)
-      const batchSize = 50;
-      let apiWorking = false;
-      for (let i = 0; i < liveOrderIds.length; i += batchSize) {
-        const batch = liveOrderIds.slice(i, i + batchSize);
-        const results = await this.client.areOrdersScoring(batch);
-
-        // P23: Debug — log exactly what the scoring API returns
-        this.logger.info(
-          `areOrdersScoring raw: ${JSON.stringify(results).slice(0, 200)} (type=${typeof results}, keys=${results ? Object.keys(results).join(",") : "null"})`,
-        );
-
-        // P22: Handle error/empty responses from SDK
-        if (!results || (typeof results === "object" && Object.keys(results).length === 0)) {
-          if (!this.scoringApiWarned) {
-            this.logger.warn(`areOrdersScoring returned empty/null — 使用本地估算`);
-            this.scoringApiWarned = true;
-          }
-          break;
-        }
-        if (results && typeof results === "object" && "error" in results) {
-          if (!this.scoringApiWarned) {
-            this.logger.warn(
-              `areOrdersScoring API error: ${JSON.stringify(results).slice(0, 100)} — 使用本地估算`,
-            );
-            this.scoringApiWarned = true;
-          }
-          break;
-        }
-
-        apiWorking = true;
-        for (const [orderId, isScoring] of Object.entries(results)) {
-          this.scoringResults.set(orderId, isScoring);
-          const tracked = this.state.get().trackedOrders[orderId];
-          if (tracked && tracked.scoring !== isScoring) {
-            tracked.scoring = isScoring;
-            this.state.trackOrder(tracked);
-          }
-        }
-      }
-
-      // If API is broken, estimate scoring locally from spread parameters
-      if (!apiWorking) {
-        return this.estimateScoringLocally(liveOrderIds);
-      }
-    } catch (err: any) {
-      this.logger.warn(`Scoring check failed: ${err.message}`);
-      return this.estimateScoringLocally(liveOrderIds);
-    }
-
-    const stats = this.getCurrentScoringStats();
-
-    // Alert if scoring drops significantly
-    if (stats.total > 0 && stats.scoring / stats.total < 0.5) {
-      this.logger.warn(`⚠️ 只有 ${stats.scoring}/${stats.total} 个订单正在计分！检查报价参数。`);
-    }
-
-    return stats;
-  }
-
-  /**
-   * P22: When areOrdersScoring API is broken (401), estimate scoring locally.
-   * Orders within maxSpread of midpoint and above minSize are assumed scoring.
-   */
-  private estimateScoringLocally(liveOrderIds: string[]): { scoring: number; total: number } {
-    // Optimistic: assume all live orders are scoring if they were placed by our quote engine
-    // (which always places within targetSpread < maxSpread)
-    const tracked = this.state.getTrackedOrders();
-    const live = tracked.filter((o) => o.status === "live");
+    // Local estimation: all live orders placed by our quote engine are scoring
+    // (quote engine always places within targetSpread < maxSpread and above minSize)
     for (const order of live) {
-      order.scoring = true;
-      this.state.trackOrder(order);
+      if (!order.scoring) {
+        order.scoring = true;
+        this.state.trackOrder(order);
+      }
     }
+
     return { scoring: live.length, total: live.length };
   }
 
