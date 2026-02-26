@@ -134,6 +134,10 @@ export interface MarketState {
   /** GTD expiration timestamp of current orders (for refresh) */
   ordersExpireAt: number;
   accidentalFill?: AccidentalFill;
+  /** Consecutive cooldown entries without successful quoting (for P5 volatility detection) */
+  consecutiveCooldowns: number;
+  /** Mid prices when cooldown was entered (for P0 stability check) */
+  lastCooldownMids?: Record<string, number>;
 }
 
 export interface AccidentalFill {

@@ -115,12 +115,13 @@ export class MmEngine {
     this.activeMarkets = this.scanner.selectActiveMarkets(this.stateMgr.get().pausedMarkets);
     const activeIds = this.activeMarkets.map((m) => m.conditionId);
 
-    // Prune stale positions
+    // Sell orphan positions from non-active markets BEFORE pruning
+    // (prune deletes state records — must sell first while we still know about them)
+    await this.sellOrphanPositions(activeIds);
+
+    // Prune stale positions (only zero-share leftovers after sell attempts)
     const pruned = this.stateMgr.pruneStalePositions(activeIds);
     if (pruned > 0) this.logger.info(`Pruned ${pruned} stale positions`);
-
-    // Sell orphan positions from non-active markets
-    await this.sellOrphanPositions(activeIds);
 
     // Initialize market states
     for (const mkt of this.activeMarkets) {
@@ -132,6 +133,7 @@ export class MmEngine {
           cooldownUntil: 0,
           activeOrderIds: [],
           ordersExpireAt: 0,
+          consecutiveCooldowns: 0,
         });
       }
     }
@@ -319,16 +321,33 @@ export class MmEngine {
 
           case "cooldown":
             if (Date.now() > ms.cooldownUntil) {
-              if (this.isSafeToQuote(mkt)) {
+              if ((ms.consecutiveCooldowns || 0) >= 3) {
+                // Too volatile — pause market and rescan for a better one
+                this.logger.warn(
+                  `🔄 ${mkt.question.slice(0, 30)}… 连续${ms.consecutiveCooldowns}次冷却, 暂停并切换`,
+                );
+                await this.orderMgr.cancelMarketOrders(mkt.conditionId);
+                const paused = [
+                  ...new Set([...this.stateMgr.get().pausedMarkets, mkt.conditionId]),
+                ];
+                this.stateMgr.update({ pausedMarkets: paused });
+                this.stateMgr.removeMarketState(mkt.conditionId);
+                await this.rescanMarketsInternal();
+              } else if (this.isSafeToQuote(mkt, ms)) {
                 ms.phase = "quoting";
+                ms.consecutiveCooldowns = 0;
+                ms.lastCooldownMids = undefined;
                 this.stateMgr.setMarketState(mkt.conditionId, ms);
                 await this.placeQuotes(mkt, ms);
                 this.logger.info(`✅ ${mkt.question.slice(0, 30)}… 冷却结束, 重新报价`);
               } else {
-                // Mid still in danger zone — extend cooldown or switch market
+                // Mid still unstable — extend cooldown, count as another consecutive
                 ms.cooldownUntil = Date.now() + this.config.cooldownMs;
+                ms.consecutiveCooldowns = (ms.consecutiveCooldowns || 0) + 1;
                 this.stateMgr.setMarketState(mkt.conditionId, ms);
-                this.logger.info(`⏳ ${mkt.question.slice(0, 30)}… mid仍危险, 延长冷却`);
+                this.logger.info(
+                  `⏳ ${mkt.question.slice(0, 30)}… mid仍危险, 延长冷却 (连续第${ms.consecutiveCooldowns}次)`,
+                );
               }
             }
             break;
@@ -415,31 +434,36 @@ export class MmEngine {
     ms.phase = "cooldown";
     ms.cooldownUntil = Date.now() + this.config.cooldownMs;
     ms.activeOrderIds = [];
+    ms.consecutiveCooldowns = (ms.consecutiveCooldowns || 0) + 1;
+
+    // Record mids at cooldown entry for stability check
+    ms.lastCooldownMids = {};
+    for (const token of mkt.tokens) {
+      const mid = this.priceMap.get(token.tokenId);
+      if (mid) ms.lastCooldownMids[token.tokenId] = mid;
+    }
+
     this.stateMgr.setMarketState(mkt.conditionId, ms);
     this.logger.warn(
-      `⚠️ 危险区 (${source}): ${mkt.question.slice(0, 30)}… → 冷却${this.config.cooldownMs / 1000}s`,
+      `⚠️ 危险区 (${source}): ${mkt.question.slice(0, 30)}… → 冷却${this.config.cooldownMs / 1000}s` +
+        ` (连续第${ms.consecutiveCooldowns}次)`,
     );
   }
 
-  private isSafeToQuote(mkt: MmMarket): boolean {
-    const dangerSpread = mkt.rewardsMaxSpread * this.config.dangerSpreadRatio;
-    const targetSpread = mkt.rewardsMaxSpread * this.config.spreadRatio;
-
-    for (const token of mkt.tokens) {
-      const mid = this.priceMap.get(token.tokenId);
-      if (!mid) continue;
-
-      // The order would be placed at mid - targetSpread.
-      // After placement, danger zone triggers when |mid - orderPrice| < dangerSpread.
-      // Since orderPrice = mid - targetSpread, the initial distance IS targetSpread.
-      // Safe if targetSpread > dangerSpread (always true if spreadRatio > dangerSpreadRatio).
-      // But we also need to check that mid hasn't shifted since we'd be placing at current mid.
-      // This is inherently safe since we just computed it. The real check is:
-      // has the market been volatile enough that mid changed by targetSpread within cooldown period?
-      // For now, just ensure basic safety margin.
+  private isSafeToQuote(mkt: MmMarket, ms: MarketState): boolean {
+    // Check if mid has stabilized since cooldown entry
+    // If mid moved more than dangerSpread during cooldown, still volatile
+    if (ms.lastCooldownMids) {
+      const dangerSpread = mkt.rewardsMaxSpread * this.config.dangerSpreadRatio;
+      for (const token of mkt.tokens) {
+        const mid = this.priceMap.get(token.tokenId);
+        const cooldownMid = ms.lastCooldownMids[token.tokenId];
+        if (mid && cooldownMid && Math.abs(mid - cooldownMid) > dangerSpread) {
+          return false;
+        }
+      }
     }
-
-    return true; // with proper spread ratio > danger ratio, re-quoting is always safe
+    return true;
   }
 
   private needsRefresh(ms: MarketState): boolean {
@@ -457,6 +481,21 @@ export class MmEngine {
 
     this.currentQuotes.set(mkt.conditionId, quotes);
     const placedIds = await this.orderMgr.refreshMarketOrders(mkt, quotes);
+
+    // Race guard: WS danger zone may have fired during the await above,
+    // changing ms.phase to "cooldown". If so, cancel the orphan orders.
+    if (ms.phase !== "quoting") {
+      if (placedIds.length > 0) {
+        this.logger.info(
+          `Race detected: phase=${ms.phase} after placeQuotes, cancelling ${placedIds.length} orphans`,
+        );
+        try {
+          await this.client.cancelOrders(placedIds);
+        } catch {}
+        for (const id of placedIds) this.stateMgr.removeOrder(id);
+      }
+      return;
+    }
 
     ms.activeOrderIds = placedIds;
     // GTD 5min = 300s effective after 60s buffer
@@ -477,6 +516,12 @@ export class MmEngine {
 
     const ms = this.stateMgr.getMarketState(order.conditionId);
     if (!ms) return;
+
+    // Guard: skip if already processing an accidental fill (WS+REST race)
+    if (ms.phase === "exiting" && ms.accidentalFill) {
+      this.logger.info(`Fill ignored (already exiting): ${order.orderId.slice(0, 10)}`);
+      return;
+    }
 
     const emoji = order.side === "BUY" ? "🟢" : "🔴";
     this.logger.info(
@@ -605,6 +650,7 @@ export class MmEngine {
           cooldownUntil: 0,
           activeOrderIds: [],
           ordersExpireAt: 0,
+          consecutiveCooldowns: 0,
         });
       }
     }

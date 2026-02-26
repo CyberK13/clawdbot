@@ -46,12 +46,18 @@ interface WsBookUpdate {
   hash?: string;
 }
 
-/** Price change event from market channel */
+/** Price change event from market channel (contains array of per-asset changes) */
 interface WsPriceChange {
   event_type: "price_change";
-  asset_id: string;
   market: string;
-  price: string;
+  price_changes: Array<{
+    asset_id: string;
+    price: string;
+    size: string;
+    side: string;
+    best_bid: string;
+    best_ask: string;
+  }>;
   timestamp: string;
 }
 
@@ -311,14 +317,8 @@ export class WsFeed {
       );
       this.marketReconnectDelay = 1000;
 
-      // Subscribe to each token's orderbook updates
-      for (const tokenId of this.subscribedTokens) {
-        const sub = {
-          assets_id: tokenId,
-          type: "market",
-        };
-        this.marketWs!.send(JSON.stringify(sub));
-      }
+      // Subscribe to all tokens' orderbook updates (assets_ids plural, array)
+      this.marketWs!.send(JSON.stringify({ assets_ids: this.subscribedTokens, type: "market" }));
 
       this.marketPingTimer = setInterval(() => {
         if (this.marketWs?.readyState === WebSocket.OPEN) {
@@ -376,9 +376,17 @@ export class WsFeed {
     if (bids.length === 0 && asks.length === 0) return;
 
     // Compute midpoint from top of book
-    // CLOB WS bids ascending (best bid = last), asks descending (best ask = last)
-    const bestBid = bids.length > 0 ? parseFloat(bids[bids.length - 1].price) : 0;
-    const bestAsk = asks.length > 0 ? parseFloat(asks[asks.length - 1].price) : 1;
+    // WS may send delta updates — don't assume sort order, use max/min
+    let bestBid = 0;
+    for (const b of bids) {
+      const p = parseFloat(b.price);
+      if (p > bestBid) bestBid = p;
+    }
+    let bestAsk = 1;
+    for (const a of asks) {
+      const p = parseFloat(a.price);
+      if (p > 0 && p < bestAsk) bestAsk = p;
+    }
 
     if (bestBid > 0 && bestAsk < 1 && bestAsk > bestBid) {
       const mid = (bestBid + bestAsk) / 2;
@@ -388,9 +396,16 @@ export class WsFeed {
 
   private handlePriceChange(event: WsPriceChange): void {
     if (!this.onMidUpdate) return;
-    const price = parseFloat(event.price);
-    if (price > 0 && price < 1) {
-      this.onMidUpdate(event.asset_id, price);
+    const changes = event.price_changes;
+    if (!Array.isArray(changes)) return;
+
+    for (const ch of changes) {
+      const bestBid = parseFloat(ch.best_bid);
+      const bestAsk = parseFloat(ch.best_ask);
+      if (bestBid > 0 && bestAsk > 0 && bestAsk > bestBid) {
+        const mid = (bestBid + bestAsk) / 2;
+        this.onMidUpdate(ch.asset_id, mid);
+      }
     }
   }
 
