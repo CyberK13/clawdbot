@@ -342,7 +342,14 @@ export class AccidentalFillHandler {
       );
 
       if (pos) {
-        this.state.updatePosition(fill.tokenId, fill.tokenId, pos.outcome, shares, bestBid, "SELL");
+        this.state.updatePosition(
+          fill.tokenId,
+          pos.conditionId,
+          pos.outcome,
+          shares,
+          bestBid,
+          "SELL",
+        );
       }
       this.logger.info(
         `Stage 3: FAK SELL ${shares.toFixed(1)} @ ${bestBid.toFixed(3)} ${fill.tokenId.slice(0, 10)}`,

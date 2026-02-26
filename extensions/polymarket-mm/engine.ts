@@ -430,7 +430,8 @@ export class MmEngine {
   }
 
   private async enterCooldown(mkt: MmMarket, ms: MarketState, source: string): Promise<void> {
-    await this.orderMgr.cancelMarketOrders(mkt.conditionId);
+    // P9 fix: set phase SYNCHRONOUSLY before await to prevent WS race
+    // (two WS events could enter enterCooldown in parallel otherwise)
     ms.phase = "cooldown";
     ms.cooldownUntil = Date.now() + this.config.cooldownMs;
     ms.activeOrderIds = [];
@@ -448,6 +449,9 @@ export class MmEngine {
       `⚠️ 危险区 (${source}): ${mkt.question.slice(0, 30)}… → 冷却${this.config.cooldownMs / 1000}s` +
         ` (连续第${ms.consecutiveCooldowns}次)`,
     );
+
+    // Async cancel AFTER state is set — safe because phase is already "cooldown"
+    await this.orderMgr.cancelMarketOrders(mkt.conditionId);
   }
 
   private isSafeToQuote(mkt: MmMarket, ms: MarketState): boolean {
@@ -517,9 +521,26 @@ export class MmEngine {
     const ms = this.stateMgr.getMarketState(order.conditionId);
     if (!ms) return;
 
-    // Guard: skip if already processing an accidental fill (WS+REST race)
+    // P17 fix: if already exiting, still record the position (otherwise shares become invisible)
     if (ms.phase === "exiting" && ms.accidentalFill) {
-      this.logger.info(`Fill ignored (already exiting): ${order.orderId.slice(0, 10)}`);
+      const outcome = market.tokens.find((t) => t.tokenId === order.tokenId)?.outcome ?? "?";
+      this.stateMgr.updatePosition(
+        order.tokenId,
+        order.conditionId,
+        outcome,
+        fillSize,
+        order.price,
+        order.side,
+      );
+      // Accumulate into existing fill if same token
+      if (order.tokenId === ms.accidentalFill.tokenId) {
+        ms.accidentalFill.shares += fillSize;
+      }
+      this.stateMgr.setMarketState(ms.conditionId, ms);
+      this.logger.warn(
+        `Additional fill during exit: ${order.side} ${fillSize.toFixed(1)} @ ${order.price.toFixed(3)} ` +
+          `(${order.orderId.slice(0, 10)})`,
+      );
       return;
     }
 
