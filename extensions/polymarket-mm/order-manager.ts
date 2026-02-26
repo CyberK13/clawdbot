@@ -112,6 +112,10 @@ export class OrderManager {
       };
 
       this.state.trackOrder(tracked);
+      this.logger.info(
+        `📝 Placed ${target.side} ${target.size.toFixed(1)} @ ${target.price.toFixed(4)} ` +
+          `(${orderId.slice(0, 12)}… ${isBuy ? "GTD 5min" : "GTC"})`,
+      );
       return tracked;
     } catch (err: any) {
       if (err.message?.includes("post only")) {

@@ -230,6 +230,33 @@ export class StateManager {
     );
   }
 
+  /** P18: Clear all tracked orders on startup (stale orders from previous session). */
+  clearAllTrackedOrders(): void {
+    const count = Object.keys(this.state.trackedOrders).length;
+    if (count > 0) {
+      this.state.trackedOrders = {};
+      this.dirty = true;
+      this.logger.info(`Cleared ${count} stale tracked orders from previous session`);
+    }
+  }
+
+  /** P21: Remove market states for non-active markets. */
+  cleanupStaleMarketStates(activeIds: string[]): void {
+    const activeSet = new Set(activeIds);
+    const allIds = Object.keys(this.state.marketStates || {});
+    let removed = 0;
+    for (const id of allIds) {
+      if (!activeSet.has(id)) {
+        delete this.state.marketStates[id];
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      this.dirty = true;
+      this.logger.info(`Removed ${removed} stale market states`);
+    }
+  }
+
   // ---- Fill history --------------------------------------------------------
 
   recordFill(fill: FillEvent): void {

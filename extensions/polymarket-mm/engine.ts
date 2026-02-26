@@ -110,6 +110,16 @@ export class MmEngine {
         `maxPerMarket=$${this.config.maxCapitalPerMarket.toFixed(0)}`,
     );
 
+    // P18 fix: Cancel any lingering exchange orders and clear stale tracked orders on startup
+    // Old orders from previous session may have expired (GTD) or been orphaned.
+    try {
+      await this.client.cancelAll();
+      this.logger.info("Startup: cancelled all lingering exchange orders");
+    } catch (err: any) {
+      this.logger.warn(`Startup cancel-all failed (non-fatal): ${err.message}`);
+    }
+    this.stateMgr.clearAllTrackedOrders();
+
     // Market scan
     await this.scanner.scan();
     this.activeMarkets = this.scanner.selectActiveMarkets(this.stateMgr.get().pausedMarkets);
@@ -122,6 +132,9 @@ export class MmEngine {
     // Prune stale positions (only zero-share leftovers after sell attempts)
     const pruned = this.stateMgr.pruneStalePositions(activeIds);
     if (pruned > 0) this.logger.info(`Pruned ${pruned} stale positions`);
+
+    // P21 fix: Remove stale market states for non-active markets
+    this.stateMgr.cleanupStaleMarketStates(activeIds);
 
     // Initialize market states
     for (const mkt of this.activeMarkets) {

@@ -54,6 +54,14 @@ export class RewardTracker {
         const batch = liveOrderIds.slice(i, i + batchSize);
         const results = await this.client.areOrdersScoring(batch);
 
+        // P20: Debug log to diagnose scoring API issues
+        const keys = Object.keys(results || {});
+        if (keys.length === 0) {
+          this.logger.warn(
+            `areOrdersScoring returned empty for ${batch.length} orders: ${batch.map((id) => id.slice(0, 12)).join(", ")}`,
+          );
+        }
+
         for (const [orderId, isScoring] of Object.entries(results)) {
           this.scoringResults.set(orderId, isScoring);
           // Update tracked order scoring status
