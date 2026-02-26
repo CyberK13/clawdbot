@@ -56,7 +56,19 @@ export class RewardTracker {
         const batch = liveOrderIds.slice(i, i + batchSize);
         const results = await this.client.areOrdersScoring(batch);
 
-        // P22: Handle error responses from SDK (returns {error:...,status:401} instead of throwing)
+        // P23: Debug — log exactly what the scoring API returns
+        this.logger.info(
+          `areOrdersScoring raw: ${JSON.stringify(results).slice(0, 200)} (type=${typeof results}, keys=${results ? Object.keys(results).join(",") : "null"})`,
+        );
+
+        // P22: Handle error/empty responses from SDK
+        if (!results || (typeof results === "object" && Object.keys(results).length === 0)) {
+          if (!this.scoringApiWarned) {
+            this.logger.warn(`areOrdersScoring returned empty/null — 使用本地估算`);
+            this.scoringApiWarned = true;
+          }
+          break;
+        }
         if (results && typeof results === "object" && "error" in results) {
           if (!this.scoringApiWarned) {
             this.logger.warn(
