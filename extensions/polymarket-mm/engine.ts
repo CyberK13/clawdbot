@@ -55,6 +55,8 @@ export class MmEngine {
   private activeMarkets: MmMarket[] = [];
   private cachedBalance = 0;
   private lastMidCorrection: Map<string, number> = new Map();
+  /** P28 #3: Dedup fill processing — prevents WS+REST double-counting */
+  private processedFillKeys = new Set<string>();
 
   private clientOpts: ClientOptions;
 
@@ -316,7 +318,9 @@ export class MmEngine {
       }
 
       // 3. Per-market phase logic
-      for (const mkt of this.activeMarkets) {
+      // P28 #5 fix: snapshot activeMarkets to prevent rescan from replacing mid-loop
+      const marketsSnapshot = [...this.activeMarkets];
+      for (const mkt of marketsSnapshot) {
         const ms = this.stateMgr.getMarketState(mkt.conditionId);
         if (!ms) continue;
 
@@ -435,11 +439,40 @@ export class MmEngine {
       const mid = this.priceMap.get(order.tokenId);
       if (!mid) continue;
 
+      // 1. Classic mid-distance check
       const distance = Math.abs(mid - order.price);
       const dangerSpread = mkt.rewardsMaxSpread * this.config.dangerSpreadRatio;
       if (distance < dangerSpread) return true;
+
+      // 2. P27: Book-depth cushion check — protects against aggressive taker sweeps.
+      // If there isn't enough bid liquidity between our order and mid, a taker can
+      // sweep straight through to us regardless of mid position.
+      if (this.config.minCushionRatio > 0) {
+        const book = this.books.get(order.tokenId);
+        if (book) {
+          const cushion = this.measureCushion(book, order.price, mid);
+          const minCushion = this.config.orderSize * this.config.minCushionRatio;
+          if (cushion < minCushion) return true;
+        }
+      }
     }
     return false;
+  }
+
+  /**
+   * P27: Measure the USD value of bids sitting between our order price and mid.
+   * These bids act as a cushion — a taker must fill them before reaching us.
+   * Excludes orders at our exact price level (likely our own order).
+   */
+  private measureCushion(book: BookSnapshot, orderPrice: number, mid: number): number {
+    let cushionUsd = 0;
+    for (const bid of book.bids) {
+      // Only count bids strictly above our price and below mid
+      if (bid.price > orderPrice + 0.001 && bid.price < mid) {
+        cushionUsd += bid.size * bid.price;
+      }
+    }
+    return cushionUsd;
   }
 
   private async enterCooldown(mkt: MmMarket, ms: MarketState, source: string): Promise<void> {
@@ -528,6 +561,17 @@ export class MmEngine {
   // ---- Fill handling -------------------------------------------------------
 
   private async handleFill(order: TrackedOrder, fillSize: number): Promise<void> {
+    // P28 #3: Deduplicate — both WS and REST can detect the same fill.
+    // Key on orderId + cumulative filledSize to allow genuine partial fill updates.
+    const fillKey = `${order.orderId}:${order.filledSize}`;
+    if (this.processedFillKeys.has(fillKey)) return;
+    this.processedFillKeys.add(fillKey);
+    // Prune dedup set periodically (keep last 100 entries)
+    if (this.processedFillKeys.size > 100) {
+      const entries = [...this.processedFillKeys];
+      this.processedFillKeys = new Set(entries.slice(-50));
+    }
+
     const market = this.activeMarkets.find((m) => m.conditionId === order.conditionId);
     if (!market) return;
 

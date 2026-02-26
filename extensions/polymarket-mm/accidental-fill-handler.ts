@@ -9,6 +9,10 @@
 //   Stage 4 (30min+):  Try redeem (resolved?) or abandon + alert
 //
 // Price protection: never sell below entry × minSellPriceRatio (first 30min)
+//
+// P26: All SELL attempts wait for on-chain settlement (tokens arrive at proxy)
+//   before placing orders. Polymarket settles fills in batches — WS reports
+//   fill immediately but proxy may not hold tokens for seconds to minutes.
 // ---------------------------------------------------------------------------
 
 import { OrderType, Side } from "@polymarket/clob-client";
@@ -235,6 +239,52 @@ export class AccidentalFillHandler {
 
   // ---- Internal -----------------------------------------------------------
 
+  /**
+   * P26: Wait for on-chain settlement — poll getConditionalBalance until
+   * tokens appear in the proxy wallet. Polymarket settles fills in batches;
+   * WS reports fills immediately but proxy may not hold tokens yet.
+   *
+   * Returns the confirmed balance, or 0 if settlement didn't arrive in time.
+   */
+  private async waitForSettlement(
+    tokenId: string,
+    expectedShares: number,
+    maxWaitMs = 60_000,
+  ): Promise<number> {
+    const start = Date.now();
+    // P28 #7 fix: delays must fit within maxWaitMs. Scale them to fit.
+    const baseDelays = [2_000, 3_000, 5_000, 5_000, 5_000, 5_000, 5_000];
+    let attempt = 0;
+
+    while (Date.now() - start < maxWaitMs) {
+      const balance = await this.client.getConditionalBalance(tokenId);
+      if (balance >= expectedShares * 0.95) {
+        // 5% tolerance for rounding
+        return balance;
+      }
+      if (balance > 0) {
+        this.logger.info(
+          `Settlement partial: ${balance.toFixed(1)}/${expectedShares.toFixed(1)} shares, waiting...`,
+        );
+      }
+
+      const remaining = maxWaitMs - (Date.now() - start);
+      if (remaining <= 0) break;
+      const delay = Math.min(baseDelays[Math.min(attempt, baseDelays.length - 1)], remaining);
+      await new Promise((r) => setTimeout(r, delay));
+      attempt++;
+    }
+
+    // Final check
+    const finalBalance = await this.client.getConditionalBalance(tokenId);
+    if (finalBalance > 0) return finalBalance;
+
+    this.logger.warn(
+      `Settlement timeout: ${tokenId.slice(0, 10)} expected ${expectedShares.toFixed(1)} shares after ${maxWaitMs / 1000}s`,
+    );
+    return 0;
+  }
+
   private async placeLimitSell(ms: MarketState, market: MmMarket, mid: number): Promise<void> {
     const fill = ms.accidentalFill;
     if (!fill) return;
@@ -242,6 +292,17 @@ export class AccidentalFillHandler {
     const pos = this.state.getPosition(fill.tokenId);
     const shares = pos?.netShares ?? fill.shares;
     if (shares <= 0) return;
+
+    // P26: Wait for settlement before attempting SELL
+    const settled = await this.waitForSettlement(fill.tokenId, shares);
+    if (settled <= 0) {
+      this.logger.error(
+        `Stage ${fill.stage}: 无法卖出 — tokens未到账 (${fill.tokenId.slice(0, 10)})`,
+      );
+      return;
+    }
+    // Use actual settled balance (may differ from expected due to partial fills)
+    const sellShares = Math.min(shares, settled);
 
     const tick = parseFloat(market.tickSize);
     // Sell at mid (rounded up to next tick)
@@ -253,7 +314,7 @@ export class AccidentalFillHandler {
         {
           tokenID: fill.tokenId,
           price: sellPrice,
-          size: shares,
+          size: sellShares,
           side: Side.SELL,
           feeRateBps: 0,
         },
@@ -264,7 +325,7 @@ export class AccidentalFillHandler {
       fill.sellOrderId = result?.orderID || result?.orderHashes?.[0];
       this.state.setMarketState(ms.conditionId, ms);
       this.logger.info(
-        `Stage ${fill.stage}: Limit SELL ${shares.toFixed(1)} @ ${sellPrice.toFixed(3)} (${fill.tokenId.slice(0, 10)})`,
+        `Stage ${fill.stage}: Limit SELL ${sellShares.toFixed(1)} @ ${sellPrice.toFixed(3)} (${fill.tokenId.slice(0, 10)})`,
       );
     } catch (err: any) {
       this.logger.error(`Failed to place limit sell: ${err.message}`);
@@ -279,6 +340,14 @@ export class AccidentalFillHandler {
     const pos = this.state.getPosition(fill.tokenId);
     const shares = pos?.netShares ?? fill.shares;
     if (shares <= 0) return;
+
+    // P26: Verify settlement before SELL (shorter wait — stage 2 is already delayed)
+    const settled = await this.waitForSettlement(fill.tokenId, shares, 30_000);
+    if (settled <= 0) {
+      this.logger.error(`Stage 2: 无法卖出 — tokens未到账 (${fill.tokenId.slice(0, 10)})`);
+      return;
+    }
+    const sellShares = Math.min(shares, settled);
 
     try {
       const book = await this.client.getOrderBook(fill.tokenId);
@@ -300,7 +369,7 @@ export class AccidentalFillHandler {
         {
           tokenID: fill.tokenId,
           price: sellPrice,
-          size: shares,
+          size: sellShares,
           side: Side.SELL,
           feeRateBps: 0,
         },
@@ -310,7 +379,7 @@ export class AccidentalFillHandler {
       );
       fill.sellOrderId = result?.orderID || result?.orderHashes?.[0];
       this.logger.info(
-        `Stage 2: Limit SELL ${shares.toFixed(1)} @ ${sellPrice.toFixed(3)} (bestBid+tick) ${fill.tokenId.slice(0, 10)}`,
+        `Stage 2: Limit SELL ${sellShares.toFixed(1)} @ ${sellPrice.toFixed(3)} (bestBid+tick) ${fill.tokenId.slice(0, 10)}`,
       );
     } catch (err: any) {
       this.logger.error(`Aggressive sell failed: ${err.message}`);
@@ -322,6 +391,14 @@ export class AccidentalFillHandler {
     const shares = pos?.netShares ?? fill.shares;
     if (shares <= 0) return;
 
+    // P26: Verify settlement (short wait — stage 3 is already very late)
+    const settled = await this.waitForSettlement(fill.tokenId, shares, 15_000);
+    if (settled <= 0) {
+      this.logger.error(`Stage 3: 无法FAK卖出 — tokens未到账 (${fill.tokenId.slice(0, 10)})`);
+      return;
+    }
+    const sellShares = Math.min(shares, settled);
+
     try {
       const book = await this.client.getOrderBook(fill.tokenId);
       const bids = book.bids || [];
@@ -332,7 +409,7 @@ export class AccidentalFillHandler {
         {
           tokenID: fill.tokenId,
           price: Math.max(0.01, bestBid),
-          size: shares,
+          size: sellShares,
           side: Side.SELL,
           feeRateBps: 0,
         },
@@ -346,13 +423,13 @@ export class AccidentalFillHandler {
           fill.tokenId,
           pos.conditionId,
           pos.outcome,
-          shares,
+          sellShares,
           bestBid,
           "SELL",
         );
       }
       this.logger.info(
-        `Stage 3: FAK SELL ${shares.toFixed(1)} @ ${bestBid.toFixed(3)} ${fill.tokenId.slice(0, 10)}`,
+        `Stage 3: FAK SELL ${sellShares.toFixed(1)} @ ${bestBid.toFixed(3)} ${fill.tokenId.slice(0, 10)}`,
       );
     } catch (err: any) {
       this.logger.error(`FAK sell failed: ${err.message}`);

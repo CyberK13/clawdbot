@@ -91,6 +91,13 @@ export class OrderManager {
         true, // postOnly
       );
 
+      // P28 #1: Validate order result before extracting ID
+      if (result?.success === false) {
+        this.logger.warn(
+          `Order rejected: ${result.errorMsg || "unknown"} (${target.side} ${target.size.toFixed(1)} @ ${target.price})`,
+        );
+        return null;
+      }
       const orderId = result?.orderID || result?.orderHashes?.[0];
       if (!orderId) {
         this.logger.warn(`Order placed but no ID returned: ${JSON.stringify(result)}`);

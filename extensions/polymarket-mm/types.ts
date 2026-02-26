@@ -25,8 +25,9 @@ export interface MmConfig {
   refreshIntervalMs: number;
 
   // Danger zone — core v5 innovation
-  dangerSpreadRatio: number; // 0.15 of maxSpread
+  dangerSpreadRatio: number; // 0.40 of maxSpread
   cooldownMs: number; // 120_000 (2min)
+  minCushionRatio: number; // 1.5 — cancel if bid depth between order and mid < orderSize × ratio
 
   // Market selection
   maxConcurrentMarkets: number;

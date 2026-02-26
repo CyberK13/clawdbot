@@ -92,6 +92,12 @@ export class WsFeed {
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
   private fillQueue: Promise<void> = Promise.resolve();
 
+  // P28: Track last known best bid/ask per asset for delta-based mid computation.
+  // WS book updates are deltas (only bids OR asks), so we need to merge with
+  // the last known state to compute mid correctly.
+  private lastBestBid: Map<string, number> = new Map();
+  private lastBestAsk: Map<string, number> = new Map();
+
   /** Callback for mid-price updates from market channel */
   onMidUpdate: MidUpdateCallback | null = null;
 
@@ -165,6 +171,10 @@ export class WsFeed {
   updateMarkets(marketConditionIds: string[], tokenIds: string[]): void {
     this.subscribedMarkets = marketConditionIds;
     this.subscribedTokens = tokenIds;
+
+    // P28: Clear tracked bid/ask state for old tokens
+    this.lastBestBid.clear();
+    this.lastBestAsk.clear();
 
     // Reconnect user channel with new markets
     if (this.userWs && this.userWs.readyState === WebSocket.OPEN) {
@@ -290,8 +300,15 @@ export class WsFeed {
     }
     this.state.trackOrder(matched);
 
+    // P28: Queue fill handling with timeout to prevent stuck queue
     this.fillQueue = this.fillQueue
-      .then(() => this.onFill(matched!, actualFill))
+      .then(() => {
+        const fillPromise = this.onFill(matched!, actualFill);
+        const timeout = new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error("Fill handler timeout (60s)")), 60_000),
+        );
+        return Promise.race([fillPromise, timeout]);
+      })
       .catch((err) => {
         this.logger.error(`WS fill handler error: ${err.message}`);
       });
@@ -375,22 +392,79 @@ export class WsFeed {
     const asks = update.asks || [];
     if (bids.length === 0 && asks.length === 0) return;
 
-    // Compute midpoint from top of book
-    // WS may send delta updates — don't assume sort order, use max/min
-    let bestBid = 0;
-    for (const b of bids) {
-      const p = parseFloat(b.price);
-      if (p > bestBid) bestBid = p;
-    }
-    let bestAsk = 1;
-    for (const a of asks) {
-      const p = parseFloat(a.price);
-      if (p > 0 && p < bestAsk) bestAsk = p;
+    const assetId = update.asset_id;
+
+    // P28 FIX: WS sends delta updates (often only bids OR asks, not both).
+    // We merge with last known best bid/ask to compute mid correctly.
+    // Previous code required both sides in the same message, so onMidUpdate
+    // almost never fired — danger zone detection was silently broken.
+
+    // Update best bid from delta (if bids present)
+    if (bids.length > 0) {
+      let deltaBestBid = 0;
+      for (const b of bids) {
+        const p = parseFloat(b.price);
+        const s = parseFloat(b.size);
+        // size=0 means order removed — might affect bestBid if it was the best
+        if (s > 0 && p > deltaBestBid) deltaBestBid = p;
+      }
+      if (deltaBestBid > 0) {
+        const prev = this.lastBestBid.get(assetId) ?? 0;
+        this.lastBestBid.set(assetId, Math.max(deltaBestBid, prev));
+      }
+      // Check if a removal might lower the best bid
+      for (const b of bids) {
+        const p = parseFloat(b.price);
+        const s = parseFloat(b.size);
+        if (s === 0 && p >= (this.lastBestBid.get(assetId) ?? 0)) {
+          // Best bid was removed — we can't know the new best bid from delta alone.
+          // Reset to let price_change or REST correct it. Use next-best from this delta.
+          let nextBest = 0;
+          for (const b2 of bids) {
+            const p2 = parseFloat(b2.price);
+            const s2 = parseFloat(b2.size);
+            if (s2 > 0 && p2 > nextBest) nextBest = p2;
+          }
+          if (nextBest > 0) this.lastBestBid.set(assetId, nextBest);
+          else this.lastBestBid.delete(assetId);
+        }
+      }
     }
 
-    if (bestBid > 0 && bestAsk < 1 && bestAsk > bestBid) {
+    // Update best ask from delta (if asks present)
+    if (asks.length > 0) {
+      let deltaBestAsk = Infinity;
+      for (const a of asks) {
+        const p = parseFloat(a.price);
+        const s = parseFloat(a.size);
+        if (s > 0 && p > 0 && p < deltaBestAsk) deltaBestAsk = p;
+      }
+      if (deltaBestAsk < Infinity) {
+        const prev = this.lastBestAsk.get(assetId) ?? Infinity;
+        this.lastBestAsk.set(assetId, Math.min(deltaBestAsk, prev));
+      }
+      for (const a of asks) {
+        const p = parseFloat(a.price);
+        const s = parseFloat(a.size);
+        if (s === 0 && p <= (this.lastBestAsk.get(assetId) ?? Infinity)) {
+          let nextBest = Infinity;
+          for (const a2 of asks) {
+            const p2 = parseFloat(a2.price);
+            const s2 = parseFloat(a2.size);
+            if (s2 > 0 && p2 > 0 && p2 < nextBest) nextBest = p2;
+          }
+          if (nextBest < Infinity) this.lastBestAsk.set(assetId, nextBest);
+          else this.lastBestAsk.delete(assetId);
+        }
+      }
+    }
+
+    // Compute mid from merged state
+    const bestBid = this.lastBestBid.get(assetId);
+    const bestAsk = this.lastBestAsk.get(assetId);
+    if (bestBid && bestAsk && bestAsk > bestBid) {
       const mid = (bestBid + bestAsk) / 2;
-      this.onMidUpdate(update.asset_id, mid);
+      this.onMidUpdate(assetId, mid);
     }
   }
 
@@ -403,6 +477,9 @@ export class WsFeed {
       const bestBid = parseFloat(ch.best_bid);
       const bestAsk = parseFloat(ch.best_ask);
       if (bestBid > 0 && bestAsk > 0 && bestAsk > bestBid) {
+        // P28: Sync tracked state from authoritative price_change events
+        this.lastBestBid.set(ch.asset_id, bestBid);
+        this.lastBestAsk.set(ch.asset_id, bestAsk);
         const mid = (bestBid + bestAsk) / 2;
         this.onMidUpdate(ch.asset_id, mid);
       }

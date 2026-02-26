@@ -12,13 +12,20 @@ export const DEFAULT_CONFIG: MmConfig = {
   reserveRatio: 0.02,
 
   // Quoting — simple: targetSpread = maxSpread × spreadRatio
-  spreadRatio: 0.35,
+  // P27: increased from 0.35 to 0.55 — place orders deeper in book to reduce
+  // taker-sweep fill risk. Scoring at 0.55: (0.45)² = 20% of max (was 42%).
+  spreadRatio: 0.55,
   orderSize: 0, // computed at runtime
   refreshIntervalMs: 10_000,
 
   // Danger zone — core v5: cancel before fill
-  dangerSpreadRatio: 0.15, // if |mid - orderPrice| < maxSpread × 0.15 → cancel
+  // P27: increased from 0.15 to 0.40 — wider danger zone (1.4c for 3.5c market).
+  // Buffer between order and danger zone = (0.55 - 0.40) × maxSpread = 0.525c.
+  dangerSpreadRatio: 0.4, // if |mid - orderPrice| < maxSpread × 0.40 → cancel
   cooldownMs: 120_000, // 2 minutes cooldown after danger zone cancel
+  // P27: minimum book-depth cushion — if bid liquidity between our order and mid
+  // is less than this × orderSize, cancel (protects against taker sweeps)
+  minCushionRatio: 1.5,
 
   // Market selection
   maxConcurrentMarkets: 1,
@@ -50,7 +57,8 @@ export function resolveConfig(overrides?: Partial<MmConfig>): MmConfig {
   cfg.spreadRatio = clamp(cfg.spreadRatio, 0.1, 0.9);
   cfg.orderSize = Math.max(0, cfg.orderSize);
   cfg.refreshIntervalMs = Math.max(5_000, cfg.refreshIntervalMs);
-  cfg.dangerSpreadRatio = clamp(cfg.dangerSpreadRatio, 0.05, 0.5);
+  cfg.dangerSpreadRatio = clamp(cfg.dangerSpreadRatio, 0.05, 0.8);
+  cfg.minCushionRatio = clamp(cfg.minCushionRatio ?? 1.5, 0, 5);
   cfg.cooldownMs = clamp(cfg.cooldownMs, 30_000, 600_000);
   cfg.maxConcurrentMarkets = clamp(cfg.maxConcurrentMarkets, 1, 50);
   cfg.minBidDepthUsd = Math.max(0, cfg.minBidDepthUsd);
@@ -75,7 +83,7 @@ export function formatConfig(cfg: MmConfig): string {
   const lines = [
     `💰 资金: 动态(余额×${(cfg.deployRatio * 100).toFixed(0)}%), 单笔=${(cfg.orderSizeRatio * 100).toFixed(1)}%余额`,
     `📊 报价: spreadRatio=${cfg.spreadRatio}, size=$${cfg.orderSize.toFixed(0)}`,
-    `⚠️ 危险区: dangerRatio=${cfg.dangerSpreadRatio}, 冷却=${cfg.cooldownMs / 1000}s`,
+    `⚠️ 危险区: dangerRatio=${cfg.dangerSpreadRatio}, cushion=${cfg.minCushionRatio}×, 冷却=${cfg.cooldownMs / 1000}s`,
     `🏪 市场: max=${cfg.maxConcurrentMarkets}, minReward=$${cfg.minRewardRate}`,
     `🛡️ 风控: drawdown=${cfg.maxDrawdownPercent}%, dailyLoss=$${cfg.maxDailyLoss}`,
     `🚪 意外成交: 阶段=[${cfg.accidentalFillTimeouts.join(",")}]min, 地板=${(cfg.minSellPriceRatio * 100).toFixed(0)}%`,
