@@ -19,13 +19,15 @@ export const DEFAULT_CONFIG: MmConfig = {
   refreshIntervalMs: 10_000,
 
   // Danger zone — core v5: cancel before fill
-  // P27: increased from 0.15 to 0.40 — wider danger zone (1.4c for 3.5c market).
-  // Buffer between order and danger zone = (0.55 - 0.40) × maxSpread = 0.525c.
-  dangerSpreadRatio: 0.4, // if |mid - orderPrice| < maxSpread × 0.40 → cancel
+  // P29: lowered from 0.40 to 0.20 — 0.40 was too sensitive, caused constant
+  // cooldown loops (0.525c buffer ≈ natural mid noise). At 0.20:
+  // dangerSpread = 0.7c, buffer = (0.55-0.20) × 3.5c = 1.225c — much more stable.
+  dangerSpreadRatio: 0.2, // if |mid - orderPrice| < maxSpread × 0.20 → cancel
   cooldownMs: 120_000, // 2 minutes cooldown after danger zone cancel
-  // P27: minimum book-depth cushion — if bid liquidity between our order and mid
-  // is less than this × orderSize, cancel (protects against taker sweeps)
-  minCushionRatio: 1.5,
+  // P29: disabled cushion check (was 1.5). Unreliable on thin books — REST API
+  // doesn't give full depth, causing false triggers. Rely on mid-distance check
+  // + instant exit as safety net instead.
+  minCushionRatio: 0,
 
   // Market selection
   maxConcurrentMarkets: 1,
