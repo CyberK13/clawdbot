@@ -370,7 +370,15 @@ export class MmEngine {
             break;
 
           case "exiting":
-            await this.fillHandler.checkExitProgress(ms, mkt, this.priceMap);
+            // Exiting is now a brief marker during immediateSell().
+            // If we're still here after 60s, something went wrong — force to cooldown.
+            if (ms.accidentalFill && Date.now() - ms.accidentalFill.filledAt > 60_000) {
+              this.logger.warn(`Exiting stuck for >60s, forcing cooldown`);
+              ms.accidentalFill = undefined;
+              ms.phase = "cooldown";
+              ms.cooldownUntil = Date.now() + this.config.cooldownMs;
+              this.stateMgr.setMarketState(mkt.conditionId, ms);
+            }
             break;
         }
       }
@@ -562,11 +570,9 @@ export class MmEngine {
 
   private async handleFill(order: TrackedOrder, fillSize: number): Promise<void> {
     // P28 #3: Deduplicate — both WS and REST can detect the same fill.
-    // Key on orderId + cumulative filledSize to allow genuine partial fill updates.
     const fillKey = `${order.orderId}:${order.filledSize}`;
     if (this.processedFillKeys.has(fillKey)) return;
     this.processedFillKeys.add(fillKey);
-    // Prune dedup set periodically (keep last 100 entries)
     if (this.processedFillKeys.size > 100) {
       const entries = [...this.processedFillKeys];
       this.processedFillKeys = new Set(entries.slice(-50));
@@ -578,7 +584,7 @@ export class MmEngine {
     const ms = this.stateMgr.getMarketState(order.conditionId);
     if (!ms) return;
 
-    // P17 fix: if already exiting, still record the position (otherwise shares become invisible)
+    // If already selling from a previous fill on this market, just accumulate
     if (ms.phase === "exiting" && ms.accidentalFill) {
       const outcome = market.tokens.find((t) => t.tokenId === order.tokenId)?.outcome ?? "?";
       this.stateMgr.updatePosition(
@@ -589,30 +595,157 @@ export class MmEngine {
         order.price,
         order.side,
       );
-      // Accumulate into existing fill if same token
       if (order.tokenId === ms.accidentalFill.tokenId) {
         ms.accidentalFill.shares += fillSize;
       }
       this.stateMgr.setMarketState(ms.conditionId, ms);
-      this.logger.warn(
-        `Additional fill during exit: ${order.side} ${fillSize.toFixed(1)} @ ${order.price.toFixed(3)} ` +
-          `(${order.orderId.slice(0, 10)})`,
-      );
       return;
     }
 
-    const emoji = order.side === "BUY" ? "🟢" : "🔴";
-    this.logger.info(
-      `${emoji} Fill: ${order.side} ${fillSize.toFixed(1)} @ ${order.price.toFixed(3)} ` +
-        `(${market.question.slice(0, 30)}…)`,
+    this.logger.warn(
+      `🚨 Fill: ${order.side} ${fillSize.toFixed(1)} @ ${order.price.toFixed(3)} ` +
+        `(${market.question.slice(0, 30)}…) — 立即清仓`,
     );
 
-    // Cancel all orders for this market immediately
+    // 1. Cancel ALL orders for this market
     await this.orderMgr.cancelMarketOrders(market.conditionId);
     ms.activeOrderIds = [];
 
-    // Delegate to accidental fill handler
-    await this.fillHandler.handleFill(order, fillSize, market, ms, this.priceMap);
+    // 2. Record position
+    const outcome = market.tokens.find((t) => t.tokenId === order.tokenId)?.outcome ?? "?";
+    this.stateMgr.updatePosition(
+      order.tokenId,
+      order.conditionId,
+      outcome,
+      fillSize,
+      order.price,
+      order.side,
+    );
+
+    // Record fill event
+    this.stateMgr.recordFill({
+      orderId: order.orderId,
+      tokenId: order.tokenId,
+      conditionId: order.conditionId,
+      side: order.side,
+      price: order.price,
+      size: fillSize,
+      timestamp: Date.now(),
+    });
+
+    // 3. Mark exiting (prevents re-quoting during sell)
+    ms.phase = "exiting";
+    ms.accidentalFill = {
+      tokenId: order.tokenId,
+      shares: fillSize,
+      entryPrice: order.price,
+      filledAt: Date.now(),
+      stage: 3, // skip to FAK stage
+    };
+    this.stateMgr.setMarketState(ms.conditionId, ms);
+
+    // 4. IMMEDIATE FAK sell — wait settlement then dump
+    const sold = await this.immediateSell(order.tokenId, market, fillSize);
+
+    // 5. Back to quoting regardless of sell result
+    ms.accidentalFill = undefined;
+    ms.phase = "cooldown";
+    ms.cooldownUntil = Date.now() + this.config.cooldownMs;
+    this.stateMgr.setMarketState(ms.conditionId, ms);
+
+    if (sold) {
+      this.logger.info(`✅ 清仓成功, 进入冷却`);
+    } else {
+      this.logger.error(`❌ 清仓失败, 需要 /mm sell 手动清理`);
+    }
+  }
+
+  /**
+   * Immediate FAK sell — wait for settlement (max 15s) then market-dump.
+   * No price floor, no staging, no waiting. Just sell.
+   */
+  private async immediateSell(
+    tokenId: string,
+    market: MmMarket,
+    expectedShares: number,
+  ): Promise<boolean> {
+    // Wait for tokens to settle to proxy wallet (max 15s)
+    let shares = 0;
+    for (let i = 0; i < 6; i++) {
+      await new Promise((r) => setTimeout(r, i === 0 ? 2_000 : 3_000));
+      shares = await this.client.getConditionalBalance(tokenId);
+      if (shares >= expectedShares * 0.9) break;
+    }
+
+    if (shares <= 0) {
+      this.logger.error(
+        `Settlement failed: 0 shares after 15s (expected ${expectedShares.toFixed(1)})`,
+      );
+      return false;
+    }
+
+    // FAK sell at bestBid with 3 retries
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const book = await this.client.getOrderBook(tokenId);
+        const bids = book.bids || [];
+        const bestBid = bids.length > 0 ? parseFloat(bids[bids.length - 1].price) : 0;
+        if (bestBid <= 0) {
+          this.logger.warn(`No bids for ${tokenId.slice(0, 10)}…, retry ${attempt + 1}/3`);
+          await new Promise((r) => setTimeout(r, 3_000));
+          continue;
+        }
+
+        const sellResult = await this.client.createAndPostOrder(
+          {
+            tokenID: tokenId,
+            price: Math.max(0.01, bestBid),
+            size: shares,
+            side: Side.SELL,
+            feeRateBps: 0,
+          },
+          {
+            tickSize: (book.tick_size || market.tickSize) as any,
+            negRisk: book.neg_risk ?? market.negRisk,
+          },
+          OrderType.FAK,
+          false,
+        );
+
+        if (sellResult?.success === false) {
+          throw new Error(sellResult.errorMsg || "order rejected");
+        }
+
+        this.logger.info(
+          `🔥 FAK SELL: ${shares.toFixed(1)} @ ${bestBid.toFixed(3)} (${tokenId.slice(0, 10)}…)`,
+        );
+
+        // Update position
+        const pos = this.stateMgr.getPosition(tokenId);
+        if (pos) {
+          this.stateMgr.updatePosition(
+            tokenId,
+            market.conditionId,
+            pos.outcome,
+            shares,
+            bestBid,
+            "SELL",
+          );
+        }
+        return true;
+      } catch (err: any) {
+        if (
+          attempt < 2 &&
+          (err.message?.includes("balance") || err.message?.includes("allowance"))
+        ) {
+          await new Promise((r) => setTimeout(r, 5_000));
+          continue;
+        }
+        this.logger.error(`FAK sell failed: ${err.message}`);
+        return false;
+      }
+    }
+    return false;
   }
 
   // ---- Book refresh --------------------------------------------------------
