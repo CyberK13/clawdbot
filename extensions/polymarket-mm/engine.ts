@@ -10,7 +10,7 @@
 //   Fill = accident, not goal. Cancel before fill.
 // ---------------------------------------------------------------------------
 
-import { Side } from "@polymarket/clob-client";
+import { OrderType, Side } from "@polymarket/clob-client";
 import type { PluginLogger } from "../../src/plugins/types.js";
 import { AccidentalFillHandler } from "./accidental-fill-handler.js";
 import { PolymarketClient, type ClientOptions } from "./client.js";
@@ -755,6 +755,173 @@ export class MmEngine {
 
     this.logger.info(`Liquidation: ${success} sold, ${failed} failed`);
     return { success, failed };
+  }
+
+  /**
+   * /mm sell — unconditional market-price liquidation.
+   * 1. Stop engine if running (cancel all orders)
+   * 2. Collect ALL token IDs from state + active markets
+   * 3. Check on-chain balance for each (catches orphan positions)
+   * 4. FAK sell everything with balance > 0
+   * Returns detailed results for TG display.
+   */
+  async sellAll(): Promise<{
+    stopped: boolean;
+    sold: Array<{ tokenId: string; shares: number; price: number; ok: boolean }>;
+    errors: string[];
+  }> {
+    const result: Awaited<ReturnType<MmEngine["sellAll"]>> = {
+      stopped: false,
+      sold: [],
+      errors: [],
+    };
+
+    // 1. Initialize client if needed
+    if (!this.client.initialized) {
+      try {
+        await this.client.init();
+      } catch (err: any) {
+        result.errors.push(`Client init failed: ${err.message}`);
+        return result;
+      }
+    }
+
+    // 2. Stop engine if running
+    if (this.running) {
+      await this.stop("sellAll — unconditional liquidation");
+      result.stopped = true;
+    }
+
+    // 3. Cancel ALL open orders (belt & suspenders)
+    try {
+      await this.client.cancelAll();
+    } catch (err: any) {
+      result.errors.push(`Cancel-all failed (non-fatal): ${err.message}`);
+    }
+
+    // 4. Collect all known token IDs
+    const tokenSet = new Map<string, string>(); // tokenId → conditionId
+    const st = this.stateMgr.get();
+
+    // From state positions
+    for (const pos of Object.values(st.positions)) {
+      tokenSet.set(pos.tokenId, pos.conditionId);
+    }
+    // From active markets
+    for (const mkt of this.activeMarkets) {
+      for (const t of mkt.tokens) {
+        tokenSet.set(t.tokenId, mkt.conditionId);
+      }
+    }
+    // From scanner cached markets (broader coverage)
+    for (const mkt of this.scanner.getMarkets()) {
+      for (const t of mkt.tokens) {
+        if (!tokenSet.has(t.tokenId)) {
+          tokenSet.set(t.tokenId, mkt.conditionId);
+        }
+      }
+    }
+
+    if (tokenSet.size === 0) {
+      this.logger.info("sellAll: no tokens to check");
+      return result;
+    }
+
+    this.logger.info(`sellAll: checking ${tokenSet.size} tokens for on-chain balances...`);
+
+    // 5. Check on-chain balance for each token, sell if > 0
+    for (const [tokenId, conditionId] of tokenSet) {
+      try {
+        const shares = await this.client.getConditionalBalance(tokenId);
+        if (shares <= 0.01) continue; // skip dust
+
+        this.logger.info(`sellAll: found ${shares.toFixed(2)} shares on ${tokenId.slice(0, 12)}…`);
+
+        // Get orderbook for best bid
+        const book = await this.client.getOrderBook(tokenId);
+        const bids = book.bids || [];
+        const bestBid = bids.length > 0 ? parseFloat(bids[bids.length - 1].price) : 0;
+
+        if (bestBid <= 0) {
+          result.sold.push({ tokenId, shares, price: 0, ok: false });
+          result.errors.push(`No bids for ${tokenId.slice(0, 12)}…`);
+          continue;
+        }
+
+        const sellPrice = Math.max(0.01, bestBid);
+        const tickSize = (book.tick_size || "0.01") as import("@polymarket/clob-client").TickSize;
+        const negRisk = book.neg_risk || false;
+
+        // FAK sell with 3 retries (settlement delay)
+        let sold = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const sellResult = await this.client.createAndPostOrder(
+              {
+                tokenID: tokenId,
+                price: sellPrice,
+                size: shares,
+                side: Side.SELL,
+                feeRateBps: 0,
+              },
+              { tickSize, negRisk },
+              OrderType.FAK,
+              false,
+            );
+            if (sellResult?.success === false) {
+              throw new Error(sellResult.errorMsg || "order rejected");
+            }
+            sold = true;
+            break;
+          } catch (sellErr: any) {
+            if (
+              attempt < 2 &&
+              (sellErr.message?.includes("balance") || sellErr.message?.includes("allowance"))
+            ) {
+              await new Promise((r) => setTimeout(r, 5_000));
+              continue;
+            }
+            result.errors.push(`Sell ${tokenId.slice(0, 12)}…: ${sellErr.message}`);
+            break;
+          }
+        }
+
+        result.sold.push({ tokenId, shares, price: sellPrice, ok: sold });
+
+        // Update state if sold
+        if (sold) {
+          const pos = this.stateMgr.getPosition(tokenId);
+          if (pos) {
+            this.stateMgr.updatePosition(
+              tokenId,
+              conditionId,
+              pos.outcome,
+              shares,
+              sellPrice,
+              "SELL",
+            );
+          }
+        }
+      } catch (err: any) {
+        result.errors.push(`Check ${tokenId.slice(0, 12)}…: ${err.message}`);
+      }
+    }
+
+    // 6. Refresh balance
+    try {
+      this.cachedBalance = await this.client.getBalance();
+      this.adjustSizingToBalance(this.cachedBalance);
+    } catch {}
+
+    this.stateMgr.forceSave();
+    const soldCount = result.sold.filter((s) => s.ok).length;
+    const failedCount = result.sold.filter((s) => !s.ok).length;
+    this.logger.info(
+      `sellAll complete: ${soldCount} sold, ${failedCount} failed, ` +
+        `${result.errors.length} errors, balance=$${this.cachedBalance.toFixed(2)}`,
+    );
+
+    return result;
   }
 
   private async sellOrphanPositions(activeConditionIds: string[]): Promise<void> {

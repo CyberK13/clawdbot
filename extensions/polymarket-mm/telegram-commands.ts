@@ -37,6 +37,8 @@ export function createMmCommandHandler(engine: MmEngine) {
         return handleResume(engine, args[1]);
       case "scan":
         return handleScan(engine);
+      case "sell":
+        return handleSell(engine);
       case "liquidate":
         return handleLiquidate(engine);
       case "redeem":
@@ -191,6 +193,39 @@ function handleFills(engine: MmEngine, countStr?: string): PluginCommandResult {
   return { text };
 }
 
+async function handleSell(engine: MmEngine): Promise<PluginCommandResult> {
+  try {
+    const result = await engine.sellAll();
+    let text = "🔥 全面清仓\n";
+    if (result.stopped) text += "⏹️ 引擎已停止\n";
+
+    const sold = result.sold.filter((s) => s.ok);
+    const failed = result.sold.filter((s) => !s.ok);
+
+    if (sold.length === 0 && failed.length === 0) {
+      text += "✅ 无持仓需清理";
+    } else {
+      for (const s of sold) {
+        text += `✅ ${s.shares.toFixed(1)} shares @ ${s.price.toFixed(3)} (${s.tokenId.slice(0, 10)}…)\n`;
+      }
+      for (const s of failed) {
+        text += `❌ ${s.shares.toFixed(1)} shares (${s.tokenId.slice(0, 10)}…)\n`;
+      }
+    }
+
+    if (result.errors.length > 0) {
+      text += `\n⚠️ ${result.errors.length} 错误:\n`;
+      for (const e of result.errors.slice(0, 3)) {
+        text += `  ${e}\n`;
+      }
+    }
+
+    return { text };
+  } catch (err: any) {
+    return { text: `❌ 清仓失败: ${err.message}` };
+  }
+}
+
 async function handleLiquidate(engine: MmEngine): Promise<PluginCommandResult> {
   if (engine.isRunning()) return { text: "⚠️ 先 /mm stop" };
   try {
@@ -289,6 +324,7 @@ function handleHelp(): PluginCommandResult {
       "📖 MM v5 命令:",
       "  /mm start       - 启动 (cancel-before-fill)",
       "  /mm stop        - 停止",
+      "  /mm sell        - 🔥无条件市价全清(自动停机+链上扫描)",
       "  /mm kill        - 紧急停止+清仓",
       "  /mm status      - 状态 (含market phase)",
       "  /mm portfolio   - 资产明细",
