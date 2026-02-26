@@ -1,9 +1,10 @@
 // ---------------------------------------------------------------------------
-// Polymarket Market-Maker Plugin
+// Polymarket Market-Maker Plugin — v5 Cancel-Before-Fill
 //
 // Registers:
 //   - Service: background MM engine with start/stop lifecycle
 //   - Command: /mm for Telegram control
+//   - Command: /mail for on-demand Gmail digest
 //   - Tool: polymarket_mm for AI agent queries
 // ---------------------------------------------------------------------------
 
@@ -27,7 +28,6 @@ export default function register(api: OpenClawPluginApi) {
     start: async (ctx) => {
       const cfg = api.pluginConfig as Partial<MmConfig> | undefined;
 
-      // Resolve env credentials
       const privateKey =
         process.env.POLYMARKET_Wallet_Private_Key || process.env.POLYMARKET_PRIVATE_KEY;
       const apiKey = process.env.POLYMARKET_API_KEY;
@@ -37,44 +37,30 @@ export default function register(api: OpenClawPluginApi) {
 
       if (!privateKey || !apiKey || !apiSecret || !passphrase || !funder) {
         api.logger.info(
-          "Polymarket MM: missing env credentials, service registered but not auto-started. " +
-            "Set POLYMARKET_Wallet_Private_Key, POLYMARKET_API_KEY, POLYMARKET_API_SECRET, " +
-            "POLYMARKET_PASSPHRASE, POLYMARKET_FUNDER to enable.",
+          "Polymarket MM: missing env credentials, service registered but not auto-started.",
         );
-        // Still create engine so /mm commands can show helpful errors
         return;
       }
 
       engine = new MmEngine(
-        {
-          privateKey,
-          apiKey,
-          apiSecret,
-          passphrase,
-          funder,
-          logger: ctx.logger,
-        },
+        { privateKey, apiKey, apiSecret, passphrase, funder, logger: ctx.logger },
         ctx.stateDir,
         cfg,
         ctx.logger,
       );
 
-      // Start dashboard (always on, even before MM trading starts)
       engine.startDashboard();
 
-      // Auto-start if configured
       const autoStart = (cfg as any)?.autoStart === true || process.env.MM_AUTO_START === "true";
       if (autoStart) {
-        ctx.logger.info("Polymarket MM auto-starting...");
+        ctx.logger.info("Polymarket MM v5 auto-starting...");
         await engine.start();
       } else {
-        ctx.logger.info("Polymarket MM engine initialized (use /mm start to begin)");
+        ctx.logger.info("Polymarket MM v5 engine initialized (use /mm start)");
       }
     },
     stop: async () => {
-      if (engine?.isRunning()) {
-        await engine.stop("Service shutdown");
-      }
+      if (engine?.isRunning()) await engine.stop("Service shutdown");
       engine?.stopDashboard();
       engine = null;
     },
@@ -83,20 +69,16 @@ export default function register(api: OpenClawPluginApi) {
   // ---------- Command: /mm -------------------------------------------------
   api.registerCommand({
     name: "mm",
-    description: "Polymarket 做市机器人控制",
+    description: "Polymarket MM v5 控制",
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx) => {
-      // After kill switch, engine must be recreated to load fresh state from disk.
-      // StateManager only reads disk in constructor — reusing a killed engine means
-      // stale in-memory state (totalPnl, positions) that ignores any disk resets.
       if (engine?.isKilled()) {
         engine.stopDashboard();
         engine = null;
       }
 
       if (!engine) {
-        // Lazy init if env vars are available
         const privateKey =
           process.env.POLYMARKET_Wallet_Private_Key || process.env.POLYMARKET_PRIVATE_KEY;
         const apiKey = process.env.POLYMARKET_API_KEY;
@@ -114,14 +96,7 @@ export default function register(api: OpenClawPluginApi) {
         }
 
         engine = new MmEngine(
-          {
-            privateKey,
-            apiKey,
-            apiSecret,
-            passphrase,
-            funder,
-            logger: api.logger,
-          },
+          { privateKey, apiKey, apiSecret, passphrase, funder, logger: api.logger },
           process.env.OPENCLAW_STATE_DIR || "~/.openclaw",
           api.pluginConfig as Partial<MmConfig> | undefined,
           api.logger,
@@ -133,7 +108,7 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
-  // ---------- Command: /mail — on-demand email digest -----------------------
+  // ---------- Command: /mail -----------------------------------------------
   api.registerCommand({
     name: "mail",
     description: "读取所有未读邮件并生成 AI 摘要",
@@ -142,29 +117,26 @@ export default function register(api: OpenClawPluginApi) {
     handler: async (ctx) => {
       const scriptPath = "/opt/clawdbot/gmail-digest-all.py";
       const chatId = ctx.senderId || "6309937609";
-
-      // Spawn script in background — it sends results to TG directly
       const proc = spawn("python3", [scriptPath], {
         stdio: "ignore",
         detached: true,
         env: { ...process.env, CHAT_ID: chatId },
       });
       proc.unref();
-
-      api.logger.info(`/mail triggered by ${ctx.senderId}, spawned gmail-digest-all.py`);
-      return { text: "📬 正在读取未读邮件并生成摘要，请稍候..." };
+      api.logger.info(`/mail triggered by ${ctx.senderId}`);
+      return { text: "📬 正在读取邮件..." };
     },
   });
 
-  // ---------- Tool: polymarket_mm (for AI agent) ----------------------------
+  // ---------- Tool: polymarket_mm ------------------------------------------
   api.registerTool(
     ((ctx) => {
       if (ctx.sandboxed) return null;
       return {
         name: "polymarket_mm",
         description:
-          "Query the Polymarket market-making bot status, positions, rewards, and configuration. " +
-          "Can also start/stop the bot or adjust parameters.",
+          "Query the Polymarket market-making bot (v5 cancel-before-fill). " +
+          "Status, positions, rewards, configuration. Start/stop control.",
         parameters: {
           type: "object" as const,
           properties: {
@@ -175,16 +147,14 @@ export default function register(api: OpenClawPluginApi) {
             },
             params: {
               type: "object" as const,
-              description: "Optional parameters (e.g., config key/value)",
+              description: "Optional parameters",
               additionalProperties: true,
             },
           },
           required: ["action"],
         },
         execute: async (input: { action: string; params?: Record<string, any> }) => {
-          if (!engine) {
-            return "MM engine not initialized. Configure POLYMARKET env variables first.";
-          }
+          if (!engine) return "MM engine not initialized.";
           switch (input.action) {
             case "status":
               return JSON.stringify(engine.getStatus(), null, 2);
@@ -205,14 +175,14 @@ export default function register(api: OpenClawPluginApi) {
               return JSON.stringify(engine.getConfig(), null, 2);
             case "start":
               await engine.start();
-              return "MM engine started";
+              return "MM v5 started";
             case "stop":
-              await engine.stop("Agent requested stop");
-              return "MM engine stopped";
+              await engine.stop("Agent stop");
+              return "MM stopped";
             case "trades":
               return JSON.stringify(engine.getRecentFills(10), null, 2);
             default:
-              return `Unknown action: ${input.action}`;
+              return `Unknown: ${input.action}`;
           }
         },
       } as unknown as AnyAgentTool;

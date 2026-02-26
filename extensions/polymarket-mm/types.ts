@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Polymarket Market-Making Types
+// Polymarket Market-Making Types — v5 Cancel-Before-Fill
 // ---------------------------------------------------------------------------
 
 import type {
@@ -14,104 +14,38 @@ import type {
 
 export interface MmConfig {
   // Capital — dynamic from balance
-  /** Fraction of balance to deploy per market (e.g. 0.95 = 95%) */
   deployRatio: number;
-  /** Fraction of balance for per-token order size (e.g. 0.475 = 47.5%) */
   orderSizeRatio: number;
-  /** Computed at runtime from balance × deployRatio */
-  maxCapitalPerMarket: number;
-  /** Fraction of capital to keep as reserve (0-1) */
+  maxCapitalPerMarket: number; // runtime
   reserveRatio: number;
 
-  // Quoting — dynamic spread ratios (fraction of market's maxSpread)
-  defaultSpreadRatio: number;
-  minSpreadRatio: number;
-  maxSpreadRatio: number;
-  /** Legacy fixed spread fields (used as fallback) */
-  defaultSpread: number;
-  minSpread: number;
-  maxSpread: number;
-  orderSize: number;
-  numLevels: number;
+  // Quoting — simple: targetSpread = maxSpread × spreadRatio
+  spreadRatio: number; // 0.35 of maxSpread
+  orderSize: number; // runtime
   refreshIntervalMs: number;
 
-  // Inventory management
-  maxInventoryPerMarket: number;
-  skewFactor: number;
+  // Danger zone — core v5 innovation
+  dangerSpreadRatio: number; // 0.15 of maxSpread
+  cooldownMs: number; // 120_000 (2min)
+
+  // Market selection
+  maxConcurrentMarkets: number;
+  minRewardRate: number;
+  minBidDepthUsd: number;
+  minDailyVolume: number;
+
+  // Accidental fill exit
+  accidentalFillTimeouts: [number, number, number, number]; // [5, 15, 30, 60] minutes
+  minSellPriceRatio: number; // 0.5
 
   // Risk
-  maxTotalExposure: number;
   maxDrawdownPercent: number;
   maxDailyLoss: number;
 
-  // Opportunistic
-  deviationThreshold: number;
-  opportunisticSize: number;
-
-  // Markets
-  maxConcurrentMarkets: number;
-  minDailyVolume: number;
-  minRewardRate: number;
-  /** Minimum total bid depth (USD) in orderbook to accept a market */
-  minBidDepthUsd: number;
-
-  // Fill recovery
-  fillRecoveryTimeoutMs: number;
-  maxExposureForSoftSell: number;
-  maxExposureForHardSell: number;
-
-  // Reconciliation
-  reconcileIntervalMs: number;
-
-  // Exit / liquidation safety
-  /** Min sell price as fraction of avgEntry (e.g. 0.5 = won't sell below 50% of entry) */
-  minSellPriceRatio: number;
-  /** Max retries per split level before reducing split factor */
-  forceSellMaxRetries: number;
-  /** Delay between force sell retries (ms) */
-  forceSellRetryDelayMs: number;
-  /** Whether to liquidate positions on graceful stop */
-  liquidateOnStop: boolean;
-  /** Whether to liquidate positions on emergency kill */
-  liquidateOnKill: boolean;
-  /** Max age for pending sells before disabling min price protection (ms) */
-  maxPendingSellAgeMs: number;
-
-  // Multi-level quoting
-  /** Size distribution weights per level (must sum to ~1.0) */
-  levelSizeWeights: number[];
-  /** Spread multiplier between successive levels */
-  levelSpreadMultiplier: number;
-
-  // Continuous spread model factors
-  /** Weight for realized volatility adjustment (0 disables) */
-  volatilityWeight: number;
-  /** Penalty for inventory/exposure ratio on spread (0 disables) */
-  inventorySpreadPenalty: number;
-
-  // Fast split progression
-  /** Max retries per split level before reducing */
-  forceSellMaxRetriesPerSplit: number;
-  /** Minimum split factor before reset */
-  forceSellMinSplitFactor: number;
-  /** Retry delay for urgent/critical pending sells (ms) */
-  forceSellUrgentRetryDelayMs: number;
-
-  // Protective sell
-  /** Max loss from entry price for protective SELL (e.g. 0.005 = -0.5%) */
-  protectiveSellSpread: number;
-
-  // Trailing stop (Livermore)
-  /** Hard stop loss: sell if price drops this fraction below entry (e.g. 0.02 = -2%) */
-  trailingStopLoss: number;
-  /** Activation threshold: trailing stop activates when price rises this fraction above entry */
-  trailingActivation: number;
-  /** Trailing distance: sell if price drops this fraction below peak */
-  trailingDistance: number;
-
-  // Single-sided quoting
-  /** Only place BUY on one token per market (cheaper token, 1/3 reward but half fill risk) */
+  // Exit behavior
   singleSided: boolean;
+  liquidateOnStop: boolean;
+  liquidateOnKill: boolean;
 }
 
 // ---- Market ----------------------------------------------------------------
@@ -153,13 +87,12 @@ export interface BookSnapshot {
 
 // ---- Quoting ---------------------------------------------------------------
 
-/** A target quote to be placed on the exchange */
 export interface TargetQuote {
   tokenId: string;
   side: "BUY" | "SELL";
   price: number;
-  size: number; // in shares (conditional tokens)
-  level: number; // 0 = tightest
+  size: number;
+  level: number;
 }
 
 // ---- Orders ----------------------------------------------------------------
@@ -178,86 +111,47 @@ export interface TrackedOrder {
   level: number;
 }
 
-// ---- Inventory / Position ---------------------------------------------------
+// ---- Position (kept for P&L tracking) --------------------------------------
 
 export interface Position {
   conditionId: string;
   tokenId: string;
   outcome: string;
-  /** Net shares held (positive = long, negative = short) */
   netShares: number;
-  /** Volume-weighted average entry price */
   avgEntry: number;
-  /** Realized P&L from closed portion */
   realizedPnl: number;
-  /** Trailing stop: highest price since entry (high watermark) */
-  trailingPeak?: number;
 }
 
-// ---- Risk ------------------------------------------------------------------
+// ---- Market phase (v5 core) ------------------------------------------------
 
-export type RiskAction =
-  | { type: "kill"; reason: string }
-  | { type: "pause_day"; reason: string }
-  | { type: "reduce_market"; conditionId: string; side: "BUY" | "SELL"; reason: string }
-  | { type: "reduce_all"; factor: number; reason: string }
-  | { type: "pause_market"; conditionId: string; reason: string }
-  | { type: "widen_spread"; conditionId: string; factor: number; reason: string }
-  | { type: "ok" };
+export type MarketPhase = "quoting" | "cooldown" | "exiting";
 
-// ---- State (persisted) -----------------------------------------------------
+export interface MarketState {
+  conditionId: string;
+  phase: MarketPhase;
+  cooldownUntil: number;
+  activeOrderIds: string[];
+  /** GTD expiration timestamp of current orders (for refresh) */
+  ordersExpireAt: number;
+  accidentalFill?: AccidentalFill;
+}
 
-export interface MmState {
-  running: boolean;
-  startedAt: number | null;
-  capital: number;
-  /** High watermark balance for drawdown calculation */
-  peakBalance: number;
-  dailyPnl: number;
-  dailyDate: string; // YYYY-MM-DD
-  totalPnl: number;
-  totalRewardsEstimate: number;
-  positions: Record<string, Position>; // key = tokenId
-  trackedOrders: Record<string, TrackedOrder>; // key = orderId
-  pendingSells: Record<string, PendingSell>; // key = tokenId
-  activeMarkets: string[]; // conditionIds
-  pausedMarkets: string[];
-  errorCount: number;
-  lastRefreshAt: number;
-  lastScanAt: number;
-  killSwitchTriggered: boolean;
-  dayPaused: boolean;
-  rewardHistory: Array<{ date: string; estimated: number; actual?: number }>;
-  /** Fill history for spread controller */
-  fillHistory: FillEvent[];
-  /** Dynamic spread state */
-  spreadState: SpreadState;
+export interface AccidentalFill {
+  tokenId: string;
+  shares: number;
+  entryPrice: number;
+  filledAt: number;
+  sellOrderId?: string;
+  stage: 1 | 2 | 3 | 4;
 }
 
 // ---- Reward scoring (Polymarket formula) -----------------------------------
 
 /**
- * Polymarket liquidity reward scoring:
- *   S(v, s) = ((v - s) / v)² × b
- *
- * Q_one = Σ S(v, spread_i) × bidSize_i  (on market m)
- *       + Σ S(v, spread_j) × askSize_j  (on complement m')
- *
- * Q_two = Σ S(v, spread_i) × askSize_i  (on market m)
- *       + Σ S(v, spread_j) × bidSize_j  (on complement m')
- *
- * When midpoint ∈ [0.10, 0.90]:
- *   Q_min = max(min(Q_one, Q_two), max(Q_one / c, Q_two / c))
- *   → Single-sided scores at 1/c (currently c=3.0)
- *   → Two-sided scores at min of both sides (up to 3x single-sided)
- *
- * When midpoint < 0.10 or > 0.90:
- *   Q_min = min(Q_one, Q_two)
- *   → MUST be two-sided, single-sided gets zero
- *
- * c = 3.0 (current scaling factor)
- * v = rewards_max_spread (per market, from API)
- * b = order size in shares (the "in-game multiplier")
+ * S(v, s) = ((v - s) / v)^2 * b
+ * Q_one = bids(m) + asks(m'), Q_two = asks(m) + bids(m')
+ * Mid [0.10,0.90]: Q_min = max(min(Q1,Q2), max(Q1/3, Q2/3))
+ * Extreme: Q_min = min(Q1,Q2)
  */
 export interface RewardScore {
   conditionId: string;
@@ -267,23 +161,7 @@ export interface RewardScore {
   midpoint: number;
   twoSided: boolean;
   timestamp: number;
-  /** Estimated competition (scoring-weighted USDC within spread) */
   competition: number;
-}
-
-// ---- Spread controller state -----------------------------------------------
-
-export interface SpreadState {
-  /** @deprecated Use ratioOverrides per market. Kept for state migration. */
-  currentRatio: number;
-  /** Per-market spread ratio overrides from widen_spread risk action */
-  ratioOverrides: Record<string, number>;
-  /** Fills in the last hour per market */
-  fillsPerHour: Record<string, number>;
-  /** Timestamp of last adjustment per market */
-  lastAdjustedAt: number;
-  /** Realized volatility per market (5min window) */
-  volatility: Record<string, number>;
 }
 
 // ---- Fill events -----------------------------------------------------------
@@ -298,50 +176,30 @@ export interface FillEvent {
   timestamp: number;
 }
 
-// ---- Pending Sell (persisted for crash recovery) ----------------------------
+// ---- State (persisted) — v5 simplified ------------------------------------
 
-export interface PendingSell {
-  tokenId: string;
-  conditionId: string;
-  shares: number;
-  placedAt: number;
-  sellOrderId?: string; // limit SELL order ID if placed
-  retryCount: number;
-  lastAttemptAt: number;
-  /** Earliest time to retry (overrides lastAttemptAt for long delays like no_bids) */
-  nextRetryAt?: number;
-  /** Split progression: 1.0 → 0.5 → 0.25 → 0.10 of original shares */
-  splitFactor: number;
-  /** Midpoint at the time of the fill that created this pending sell */
-  fillMidpoint?: number;
-  /** Urgency level based on adverse price movement */
-  urgency?: "low" | "medium" | "high" | "critical";
-  /** Whether the SELL order is within scoring spread (earning rewards) */
-  isScoring?: boolean;
-  /** Current phase: "protective" (tight stop-loss) or "scoring" (wider profit-seeking) */
-  phase?: "protective" | "scoring";
-  /** Market tick size (stored for phase upgrade calculations) */
-  marketTickSize?: string;
-  /** Market rewards max spread (stored for phase upgrade calculations) */
-  marketMaxSpread?: number;
-  /** Market negRisk flag */
-  marketNegRisk?: boolean;
-}
-
-// ---- Toxicity analysis ---------------------------------------------------
-
-export interface ToxicityAnalysis {
-  conditionId: string;
-  /** Directionality: 0 = balanced fills, 1 = all one-sided */
-  directionality: number;
-  /** Whether average fill size is anomalously large */
-  sizeAnomaly: boolean;
-  /** Final toxic determination */
-  isToxic: boolean;
-  /** Total fills in window */
-  totalFills: number;
-  /** Dominant side */
-  dominantSide: "BUY" | "SELL";
+export interface MmState {
+  running: boolean;
+  startedAt: number | null;
+  capital: number;
+  peakBalance: number;
+  dailyPnl: number;
+  dailyDate: string;
+  totalPnl: number;
+  totalRewardsEstimate: number;
+  positions: Record<string, Position>;
+  trackedOrders: Record<string, TrackedOrder>;
+  activeMarkets: string[];
+  pausedMarkets: string[];
+  errorCount: number;
+  lastRefreshAt: number;
+  lastScanAt: number;
+  killSwitchTriggered: boolean;
+  dayPaused: boolean;
+  rewardHistory: Array<{ date: string; estimated: number; actual?: number }>;
+  fillHistory: FillEvent[];
+  /** v5: per-market runtime state (not persisted in detail, rebuilt on start) */
+  marketStates: Record<string, MarketState>;
 }
 
 // ---- Events ----------------------------------------------------------------
@@ -354,6 +212,5 @@ export type MmEvent =
   | { type: "order_cancelled"; orderId: string }
   | { type: "market_added"; conditionId: string; question: string }
   | { type: "market_removed"; conditionId: string; reason: string }
-  | { type: "risk_action"; action: RiskAction }
   | { type: "error"; message: string }
   | { type: "reward_check"; scores: RewardScore[] };

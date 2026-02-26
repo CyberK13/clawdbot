@@ -1,20 +1,11 @@
 // ---------------------------------------------------------------------------
-// Persistent state management
-// - Auto-saves every 30 seconds and on significant events
-// - Crash recovery: reload + reconcile with exchange
+// Persistent state management — v5 simplified
 // ---------------------------------------------------------------------------
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { PluginLogger } from "../../src/plugins/types.js";
-import type {
-  MmState,
-  TrackedOrder,
-  Position,
-  FillEvent,
-  SpreadState,
-  PendingSell,
-} from "./types.js";
+import type { MmState, TrackedOrder, Position, FillEvent, MarketState } from "./types.js";
 import { todayUTC } from "./utils.js";
 
 const STATE_FILE = "polymarket-mm.json";
@@ -31,7 +22,6 @@ function defaultState(): MmState {
     totalRewardsEstimate: 0,
     positions: {},
     trackedOrders: {},
-    pendingSells: {},
     activeMarkets: [],
     pausedMarkets: [],
     errorCount: 0,
@@ -41,13 +31,7 @@ function defaultState(): MmState {
     dayPaused: false,
     rewardHistory: [],
     fillHistory: [],
-    spreadState: {
-      currentRatio: 0.35,
-      ratioOverrides: {},
-      fillsPerHour: {},
-      lastAdjustedAt: 0,
-      volatility: {},
-    },
+    marketStates: {},
   };
 }
 
@@ -64,7 +48,6 @@ export class StateManager {
     this.state = this.load();
   }
 
-  /** Start auto-save timer (every 30s). */
   startAutoSave(): void {
     if (this.saveTimer) return;
     this.saveTimer = setInterval(() => {
@@ -72,7 +55,6 @@ export class StateManager {
     }, 30_000);
   }
 
-  /** Stop auto-save timer and do a final save. */
   stopAutoSave(): void {
     if (this.saveTimer) {
       clearInterval(this.saveTimer);
@@ -81,33 +63,27 @@ export class StateManager {
     if (this.dirty) this.save();
   }
 
-  /** Get current state (readonly reference). */
   get(): Readonly<MmState> {
     return this.state;
   }
 
-  /** Update state with partial patch. */
   update(patch: Partial<MmState>): void {
     Object.assign(this.state, patch);
     this.dirty = true;
   }
 
-  /** Mark state as dirty (for in-place mutations like position.trailingPeak). */
   markDirty(): void {
     this.dirty = true;
   }
 
-  /** Check if day rolled over and reset daily counters. */
   checkDayRoll(): boolean {
     const today = todayUTC();
     if (this.state.dailyDate !== today) {
-      // Archive yesterday's reward estimate
       if (this.state.dailyDate) {
         this.state.rewardHistory.push({
           date: this.state.dailyDate,
           estimated: this.state.totalRewardsEstimate,
         });
-        // Keep last 90 days
         if (this.state.rewardHistory.length > 90) {
           this.state.rewardHistory = this.state.rewardHistory.slice(-90);
         }
@@ -116,7 +92,7 @@ export class StateManager {
       this.state.dailyDate = today;
       this.state.dayPaused = false;
 
-      // Clean up closed positions (netShares=0) to prevent state bloat
+      // Clean closed positions
       let cleaned = 0;
       for (const [tokenId, pos] of Object.entries(this.state.positions)) {
         if (pos.netShares === 0) {
@@ -150,14 +126,7 @@ export class StateManager {
   ): void {
     let pos = this.state.positions[tokenId];
     if (!pos) {
-      pos = {
-        conditionId,
-        tokenId,
-        outcome,
-        netShares: 0,
-        avgEntry: 0,
-        realizedPnl: 0,
-      };
+      pos = { conditionId, tokenId, outcome, netShares: 0, avgEntry: 0, realizedPnl: 0 };
       this.state.positions[tokenId] = pos;
     }
 
@@ -165,12 +134,10 @@ export class StateManager {
     const newShares = fillShares * direction;
 
     if ((pos.netShares >= 0 && direction > 0) || (pos.netShares <= 0 && direction < 0)) {
-      // Adding to position → update average entry
       const totalCost = pos.avgEntry * Math.abs(pos.netShares) + fillPrice * fillShares;
       pos.netShares += newShares;
       pos.avgEntry = Math.abs(pos.netShares) > 0 ? totalCost / Math.abs(pos.netShares) : 0;
     } else {
-      // Reducing/flipping position → realize P&L
       const closingShares = Math.min(fillShares, Math.abs(pos.netShares));
       const pnl = closingShares * (fillPrice - pos.avgEntry) * (pos.netShares > 0 ? 1 : -1);
       pos.realizedPnl += pnl;
@@ -178,9 +145,7 @@ export class StateManager {
       this.state.totalPnl += pnl;
 
       pos.netShares += newShares;
-      // If position flipped, set new avg entry
       if (Math.abs(pos.netShares) > closingShares) {
-        // Only the excess shares have the new price
         pos.avgEntry = fillPrice;
       } else if (pos.netShares === 0) {
         pos.avgEntry = 0;
@@ -190,7 +155,6 @@ export class StateManager {
     this.dirty = true;
   }
 
-  /** Get total unrealized P&L across all positions. */
   getUnrealizedPnl(priceMap: Map<string, number>): number {
     let total = 0;
     for (const pos of Object.values(this.state.positions)) {
@@ -201,7 +165,6 @@ export class StateManager {
     return total;
   }
 
-  /** Get total value of all long positions (netShares × price). */
   getPositionValue(priceMap: Map<string, number>): number {
     let total = 0;
     for (const pos of Object.values(this.state.positions)) {
@@ -212,22 +175,6 @@ export class StateManager {
     return total;
   }
 
-  /** Get total exposure across all positions (absolute value). */
-  getTotalExposure(priceMap: Map<string, number>): number {
-    let total = 0;
-    for (const pos of Object.values(this.state.positions)) {
-      if (pos.netShares === 0) continue;
-      const price = priceMap.get(pos.tokenId) ?? pos.avgEntry;
-      total += Math.abs(pos.netShares) * price;
-    }
-    return total;
-  }
-
-  /**
-   * Remove positions that don't belong to any active market.
-   * Stale positions from resolved/expired markets pollute exposure calculations.
-   * Returns the number of positions pruned.
-   */
   pruneStalePositions(activeConditionIds: string[]): number {
     const activeSet = new Set(activeConditionIds);
     let pruned = 0;
@@ -245,33 +192,20 @@ export class StateManager {
     return pruned;
   }
 
-  /** Get net exposure for a specific market (across both tokens). */
-  getMarketExposure(conditionId: string, priceMap: Map<string, number>): number {
-    let total = 0;
-    for (const pos of Object.values(this.state.positions)) {
-      if (pos.conditionId !== conditionId || pos.netShares === 0) continue;
-      const price = priceMap.get(pos.tokenId) ?? pos.avgEntry;
-      total += Math.abs(pos.netShares) * price;
-    }
-    return total;
+  // ---- Market state (v5) ---------------------------------------------------
+
+  getMarketState(conditionId: string): MarketState | undefined {
+    return this.state.marketStates[conditionId];
   }
 
-  // ---- Pending sells (persisted for crash recovery) -----------------------
-
-  setPendingSell(tokenId: string, pending: PendingSell): void {
-    if (!this.state.pendingSells) this.state.pendingSells = {};
-    this.state.pendingSells[tokenId] = pending;
+  setMarketState(conditionId: string, ms: MarketState): void {
+    this.state.marketStates[conditionId] = ms;
     this.dirty = true;
   }
 
-  removePendingSell(tokenId: string): void {
-    if (!this.state.pendingSells) return;
-    delete this.state.pendingSells[tokenId];
+  removeMarketState(conditionId: string): void {
+    delete this.state.marketStates[conditionId];
     this.dirty = true;
-  }
-
-  getPendingSells(): Record<string, PendingSell> {
-    return this.state.pendingSells || {};
   }
 
   // ---- Order tracking ------------------------------------------------------
@@ -298,25 +232,14 @@ export class StateManager {
 
   // ---- Fill history --------------------------------------------------------
 
-  /** Record a fill event and trim old entries. */
   recordFill(fill: FillEvent): void {
     if (!this.state.fillHistory) this.state.fillHistory = [];
     this.state.fillHistory.push(fill);
-    // Keep last 2 hours of fills
     const cutoff = Date.now() - 2 * 3600_000;
     this.state.fillHistory = this.state.fillHistory.filter((f) => f.timestamp >= cutoff);
     this.dirty = true;
   }
 
-  /** Count fills in the last hour for a specific market. */
-  getFillsPerHour(conditionId: string): number {
-    const cutoff = Date.now() - 3600_000;
-    return (this.state.fillHistory || []).filter(
-      (f) => f.conditionId === conditionId && f.timestamp >= cutoff,
-    ).length;
-  }
-
-  /** Get all fills in the last hour (all markets). */
   getRecentFillsAll(): FillEvent[] {
     const cutoff = Date.now() - 3600_000;
     return (this.state.fillHistory || []).filter((f) => f.timestamp >= cutoff);
@@ -335,7 +258,6 @@ export class StateManager {
     }
   }
 
-  /** Force an immediate save (for significant events). */
   forceSave(): void {
     this.dirty = true;
     this.save();
@@ -345,10 +267,16 @@ export class StateManager {
     try {
       if (existsSync(this.filePath)) {
         const raw = readFileSync(this.filePath, "utf-8");
-        const parsed = JSON.parse(raw) as MmState;
+        const parsed = JSON.parse(raw);
         this.logger.info(`Loaded state from ${this.filePath}`);
-        // Merge with defaults to handle schema evolution
-        return { ...defaultState(), ...parsed };
+        // Merge with defaults for schema evolution (v4→v5 compat)
+        const state = { ...defaultState(), ...parsed };
+        // Ensure marketStates exists (new in v5)
+        if (!state.marketStates) state.marketStates = {};
+        // Drop deprecated fields from v4
+        delete (state as any).pendingSells;
+        delete (state as any).spreadState;
+        return state;
       }
     } catch (err: any) {
       this.logger.warn(`Failed to load state, using defaults: ${err.message}`);

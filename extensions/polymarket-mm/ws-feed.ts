@@ -1,9 +1,9 @@
 // ---------------------------------------------------------------------------
-// WebSocket User Channel: Real-time fill detection (<1s latency)
+// WebSocket Feed — v5: User channel (fills) + Market channel (book updates)
 //
-// Connects to Polymarket's authenticated user WebSocket channel.
-// On trade events, immediately routes to the engine's fill handler.
-// Falls back to polling if WebSocket disconnects.
+// Two WS connections:
+//   1. wss://.../ws/user  — authenticated, real-time fill detection (<1s)
+//   2. wss://.../ws/market — public, real-time book updates for danger zone
 // ---------------------------------------------------------------------------
 
 import WebSocket from "ws";
@@ -11,18 +11,19 @@ import type { PluginLogger } from "../../src/plugins/types.js";
 import type { StateManager } from "./state.js";
 import type { TrackedOrder } from "./types.js";
 
-const WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
+const WS_USER_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
+const WS_MARKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 
-/** Trade event from Polymarket WebSocket user channel */
+/** Trade event from user channel */
 interface WsTradeEvent {
   event_type: "trade";
-  id: string; // unique trade ID
+  id: string;
   asset_id: string;
-  market: string; // conditionId
+  market: string;
   side: string;
   price: string;
   size: string;
-  status: string; // MATCHED, MINED, CONFIRMED, RETRYING, FAILED
+  status: string;
   taker_order_id: string;
   maker_orders?: Array<{
     order_id: string;
@@ -31,24 +32,28 @@ interface WsTradeEvent {
     price: string;
   }>;
   timestamp: string;
-  type: string; // "TRADE"
+  type: string;
 }
 
-/** Order event from Polymarket WebSocket user channel */
-interface WsOrderEvent {
-  event_type: "order";
-  id: string; // orderId
+/** Book update from market channel */
+interface WsBookUpdate {
+  event_type: "book";
   asset_id: string;
   market: string;
-  side: string;
-  price: string;
-  original_size: string;
-  size_matched: string;
-  type: string; // PLACEMENT, UPDATE, CANCELLATION
+  bids?: Array<{ price: string; size: string }>;
+  asks?: Array<{ price: string; size: string }>;
   timestamp: string;
+  hash?: string;
 }
 
-type WsEvent = WsTradeEvent | WsOrderEvent;
+/** Price change event from market channel */
+interface WsPriceChange {
+  event_type: "price_change";
+  asset_id: string;
+  market: string;
+  price: string;
+  timestamp: string;
+}
 
 export interface WsFeedOptions {
   apiKey: string;
@@ -56,23 +61,33 @@ export interface WsFeedOptions {
   passphrase: string;
 }
 
-/** Callback when a fill is detected via WebSocket */
 export type FillCallback = (order: TrackedOrder, fillSize: number) => Promise<void>;
+export type MidUpdateCallback = (tokenId: string, newMid: number) => void;
 
 export class WsFeed {
-  private ws: WebSocket | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private pingTimer: ReturnType<typeof setInterval> | null = null;
-  private running = false;
-  private reconnectDelay = 1000; // starts at 1s, backs off to 30s
-  private subscribedMarkets: string[] = [];
+  // User channel
+  private userWs: WebSocket | null = null;
+  private userReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private userPingTimer: ReturnType<typeof setInterval> | null = null;
+  private userReconnectDelay = 1000;
 
-  /** Set of trade IDs already processed (prevent double-handling) */
+  // Market channel
+  private marketWs: WebSocket | null = null;
+  private marketReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private marketPingTimer: ReturnType<typeof setInterval> | null = null;
+  private marketReconnectDelay = 1000;
+
+  private running = false;
+  private subscribedMarkets: string[] = [];
+  /** Token IDs currently subscribed to market channel */
+  private subscribedTokens: string[] = [];
+
   private processedTrades = new Set<string>();
-  /** Prune processed trades every 5 min */
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
-  /** Sequential queue to prevent concurrent fill handling */
   private fillQueue: Promise<void> = Promise.resolve();
+
+  /** Callback for mid-price updates from market channel */
+  onMidUpdate: MidUpdateCallback | null = null;
 
   constructor(
     private opts: WsFeedOptions,
@@ -81,14 +96,16 @@ export class WsFeed {
     private logger: PluginLogger,
   ) {}
 
-  /** Start the WebSocket connection. */
-  start(marketConditionIds: string[]): void {
+  /** Start both WS connections. */
+  start(marketConditionIds: string[], tokenIds: string[]): void {
     if (this.running) return;
     this.running = true;
     this.subscribedMarkets = marketConditionIds;
-    this.connect();
+    this.subscribedTokens = tokenIds;
 
-    // Prune old trade IDs every 5 minutes
+    this.connectUser();
+    this.connectMarket();
+
     this.pruneTimer = setInterval(() => {
       if (this.processedTrades.size > 1000) {
         this.processedTrades.clear();
@@ -96,56 +113,80 @@ export class WsFeed {
     }, 300_000);
   }
 
-  /** Stop the WebSocket connection. */
   stop(): void {
     this.running = false;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
+
+    // User channel cleanup
+    if (this.userReconnectTimer) {
+      clearTimeout(this.userReconnectTimer);
+      this.userReconnectTimer = null;
     }
-    if (this.pingTimer) {
-      clearInterval(this.pingTimer);
-      this.pingTimer = null;
+    if (this.userPingTimer) {
+      clearInterval(this.userPingTimer);
+      this.userPingTimer = null;
     }
+    if (this.userWs) {
+      try {
+        this.userWs.close();
+      } catch {}
+      this.userWs = null;
+    }
+
+    // Market channel cleanup
+    if (this.marketReconnectTimer) {
+      clearTimeout(this.marketReconnectTimer);
+      this.marketReconnectTimer = null;
+    }
+    if (this.marketPingTimer) {
+      clearInterval(this.marketPingTimer);
+      this.marketPingTimer = null;
+    }
+    if (this.marketWs) {
+      try {
+        this.marketWs.close();
+      } catch {}
+      this.marketWs = null;
+    }
+
     if (this.pruneTimer) {
       clearInterval(this.pruneTimer);
       this.pruneTimer = null;
     }
-    if (this.ws) {
-      try {
-        this.ws.close();
-      } catch {}
-      this.ws = null;
-    }
     this.processedTrades.clear();
   }
 
-  /** Update subscribed markets (e.g. after market scan). */
-  updateMarkets(marketConditionIds: string[]): void {
+  /** Update subscribed markets and tokens (e.g. after market scan). */
+  updateMarkets(marketConditionIds: string[], tokenIds: string[]): void {
     this.subscribedMarkets = marketConditionIds;
-    // Reconnect with new subscription if connected
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.close();
-      // Will auto-reconnect with new markets
+    this.subscribedTokens = tokenIds;
+
+    // Reconnect user channel with new markets
+    if (this.userWs && this.userWs.readyState === WebSocket.OPEN) {
+      this.userWs.close(); // will auto-reconnect
+    }
+    // Reconnect market channel with new tokens
+    if (this.marketWs && this.marketWs.readyState === WebSocket.OPEN) {
+      this.marketWs.close(); // will auto-reconnect
     }
   }
 
-  private connect(): void {
+  // ---- User channel (fills) -----------------------------------------------
+
+  private connectUser(): void {
     if (!this.running) return;
 
     try {
-      this.ws = new WebSocket(WS_URL);
+      this.userWs = new WebSocket(WS_USER_URL);
     } catch (err: any) {
-      this.logger.warn(`WS: Failed to create connection: ${err.message}`);
-      this.scheduleReconnect();
+      this.logger.warn(`WS/user: Failed to create connection: ${err.message}`);
+      this.scheduleUserReconnect();
       return;
     }
 
-    this.ws.on("open", () => {
-      this.logger.info(`WS: Connected to user channel`);
-      this.reconnectDelay = 1000; // reset backoff
+    this.userWs.on("open", () => {
+      this.logger.info("WS/user: Connected");
+      this.userReconnectDelay = 1000;
 
-      // Subscribe to user channel with auth
       const sub = {
         auth: {
           apiKey: this.opts.apiKey,
@@ -155,69 +196,57 @@ export class WsFeed {
         markets: this.subscribedMarkets,
         type: "user",
       };
-      this.ws!.send(JSON.stringify(sub));
+      this.userWs!.send(JSON.stringify(sub));
 
-      // Ping every 30s to keep connection alive
-      this.pingTimer = setInterval(() => {
-        if (this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.ping();
+      this.userPingTimer = setInterval(() => {
+        if (this.userWs?.readyState === WebSocket.OPEN) {
+          this.userWs.ping();
         }
       }, 30_000);
     });
 
-    this.ws.on("message", (data: WebSocket.Data) => {
+    this.userWs.on("message", (data: WebSocket.Data) => {
       try {
         const msg = JSON.parse(data.toString());
-        this.handleMessage(msg);
+        this.handleUserMessage(msg);
       } catch (err: any) {
-        this.logger.warn(`WS: Failed to parse message: ${err.message}`);
+        this.logger.warn(`WS/user: Failed to parse: ${err.message}`);
       }
     });
 
-    this.ws.on("close", (code, reason) => {
-      this.logger.info(`WS: Disconnected (code=${code}, reason=${reason?.toString() || "none"})`);
-      if (this.pingTimer) {
-        clearInterval(this.pingTimer);
-        this.pingTimer = null;
+    this.userWs.on("close", () => {
+      if (this.userPingTimer) {
+        clearInterval(this.userPingTimer);
+        this.userPingTimer = null;
       }
-      this.scheduleReconnect();
+      this.scheduleUserReconnect();
     });
 
-    this.ws.on("error", (err) => {
-      this.logger.warn(`WS: Error: ${err.message}`);
-      // close event will follow, triggering reconnect
+    this.userWs.on("error", (err) => {
+      this.logger.warn(`WS/user error: ${err.message}`);
     });
   }
 
-  private scheduleReconnect(): void {
+  private scheduleUserReconnect(): void {
     if (!this.running) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.logger.info(`WS: Reconnecting (delay=${this.reconnectDelay}ms)...`);
-      this.connect();
-    }, this.reconnectDelay);
-
-    // Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s max
-    this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30_000);
+    this.userReconnectTimer = setTimeout(() => {
+      this.connectUser();
+    }, this.userReconnectDelay);
+    this.userReconnectDelay = Math.min(this.userReconnectDelay * 2, 30_000);
   }
 
-  private handleMessage(msg: any): void {
-    // Array of events or single event
+  private handleUserMessage(msg: any): void {
     const events: any[] = Array.isArray(msg) ? msg : [msg];
-
     for (const event of events) {
       if (event.event_type === "trade") {
         this.handleTradeEvent(event as WsTradeEvent);
       }
-      // Order events (PLACEMENT, CANCELLATION) can be used later for tracking
     }
   }
 
   private handleTradeEvent(trade: WsTradeEvent): void {
-    // Only process MATCHED status (first notification of a fill)
-    // MINED/CONFIRMED are follow-up statuses for the same trade
     if (trade.status !== "MATCHED") return;
 
-    // Deduplicate by unique trade ID
     const tradeKey = trade.id || trade.taker_order_id + "_" + trade.timestamp;
     if (this.processedTrades.has(tradeKey)) return;
     this.processedTrades.add(tradeKey);
@@ -226,15 +255,12 @@ export class WsFeed {
     const fillPrice = parseFloat(trade.price);
     if (fillSize <= 0) return;
 
-    // Find matching tracked order
     const trackedOrders = this.state.getTrackedOrders();
 
-    // Check if we're the taker
     let matched = trackedOrders.find(
       (o) => o.orderId === trade.taker_order_id && o.status === "live",
     );
 
-    // Check if we're a maker
     if (!matched && trade.maker_orders) {
       for (const maker of trade.maker_orders) {
         matched = trackedOrders.find((o) => o.orderId === maker.order_id && o.status === "live");
@@ -242,27 +268,22 @@ export class WsFeed {
       }
     }
 
-    if (!matched) {
-      // Not our order or already processed by polling — ignore
-      return;
-    }
+    if (!matched) return;
 
     const actualFill = Math.min(fillSize, matched.originalSize - matched.filledSize);
     if (actualFill <= 0) return;
 
     this.logger.info(
       `⚡ WS fill: ${matched.side} ${actualFill.toFixed(1)} @ ${fillPrice.toFixed(3)} ` +
-        `(order=${matched.orderId.slice(0, 10)}, latency=WS)`,
+        `(order=${matched.orderId.slice(0, 10)})`,
     );
 
-    // Update tracked order status
     matched.filledSize += actualFill;
     if (matched.filledSize >= matched.originalSize) {
       matched.status = "filled";
     }
     this.state.trackOrder(matched);
 
-    // Route to engine's fill handler — sequential queue prevents concurrent processing
     this.fillQueue = this.fillQueue
       .then(() => this.onFill(matched!, actualFill))
       .catch((err) => {
@@ -270,8 +291,114 @@ export class WsFeed {
       });
   }
 
-  /** Whether the WebSocket is currently connected. */
-  get connected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+  // ---- Market channel (book updates for danger zone) ----------------------
+
+  private connectMarket(): void {
+    if (!this.running) return;
+    if (this.subscribedTokens.length === 0) return;
+
+    try {
+      this.marketWs = new WebSocket(WS_MARKET_URL);
+    } catch (err: any) {
+      this.logger.warn(`WS/market: Failed to create connection: ${err.message}`);
+      this.scheduleMarketReconnect();
+      return;
+    }
+
+    this.marketWs.on("open", () => {
+      this.logger.info(
+        `WS/market: Connected, subscribing to ${this.subscribedTokens.length} tokens`,
+      );
+      this.marketReconnectDelay = 1000;
+
+      // Subscribe to each token's orderbook updates
+      for (const tokenId of this.subscribedTokens) {
+        const sub = {
+          assets_id: tokenId,
+          type: "market",
+        };
+        this.marketWs!.send(JSON.stringify(sub));
+      }
+
+      this.marketPingTimer = setInterval(() => {
+        if (this.marketWs?.readyState === WebSocket.OPEN) {
+          this.marketWs.ping();
+        }
+      }, 30_000);
+    });
+
+    this.marketWs.on("message", (data: WebSocket.Data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        this.handleMarketMessage(msg);
+      } catch (err: any) {
+        // Silently ignore parse errors on market channel (high frequency)
+      }
+    });
+
+    this.marketWs.on("close", () => {
+      if (this.marketPingTimer) {
+        clearInterval(this.marketPingTimer);
+        this.marketPingTimer = null;
+      }
+      this.scheduleMarketReconnect();
+    });
+
+    this.marketWs.on("error", (err) => {
+      this.logger.warn(`WS/market error: ${err.message}`);
+    });
+  }
+
+  private scheduleMarketReconnect(): void {
+    if (!this.running) return;
+    this.marketReconnectTimer = setTimeout(() => {
+      this.connectMarket();
+    }, this.marketReconnectDelay);
+    this.marketReconnectDelay = Math.min(this.marketReconnectDelay * 2, 30_000);
+  }
+
+  private handleMarketMessage(msg: any): void {
+    const events: any[] = Array.isArray(msg) ? msg : [msg];
+    for (const event of events) {
+      if (event.event_type === "book") {
+        this.handleBookUpdate(event as WsBookUpdate);
+      } else if (event.event_type === "price_change") {
+        this.handlePriceChange(event as WsPriceChange);
+      }
+    }
+  }
+
+  private handleBookUpdate(update: WsBookUpdate): void {
+    if (!this.onMidUpdate) return;
+
+    const bids = update.bids || [];
+    const asks = update.asks || [];
+    if (bids.length === 0 && asks.length === 0) return;
+
+    // Compute midpoint from top of book
+    // CLOB WS bids ascending (best bid = last), asks descending (best ask = last)
+    const bestBid = bids.length > 0 ? parseFloat(bids[bids.length - 1].price) : 0;
+    const bestAsk = asks.length > 0 ? parseFloat(asks[asks.length - 1].price) : 1;
+
+    if (bestBid > 0 && bestAsk < 1 && bestAsk > bestBid) {
+      const mid = (bestBid + bestAsk) / 2;
+      this.onMidUpdate(update.asset_id, mid);
+    }
+  }
+
+  private handlePriceChange(event: WsPriceChange): void {
+    if (!this.onMidUpdate) return;
+    const price = parseFloat(event.price);
+    if (price > 0 && price < 1) {
+      this.onMidUpdate(event.asset_id, price);
+    }
+  }
+
+  get userConnected(): boolean {
+    return this.userWs?.readyState === WebSocket.OPEN;
+  }
+
+  get marketConnected(): boolean {
+    return this.marketWs?.readyState === WebSocket.OPEN;
   }
 }
