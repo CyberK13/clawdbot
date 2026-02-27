@@ -206,6 +206,15 @@ export class MarketScanner {
       tickSize = (book.tick_size as TickSize) || "0.01";
       negRisk = book.neg_risk || false;
 
+      // P30: Reject markets where maxSpread < tick size — impossible to quote within spread
+      const tick = parseFloat(tickSize);
+      if (maxSpreadPrice < tick) {
+        this.logger.info(
+          `Skipping ${cand.condition_id.slice(0, 16)}: maxSpread ${maxSpreadPrice} < tick ${tick} (unquotable)`,
+        );
+        return null;
+      }
+
       const mid = this.midFromBook(book);
       competition = this.measureCompetition(book, mid, maxSpreadPrice);
 

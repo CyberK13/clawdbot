@@ -53,7 +53,10 @@ export class QuoteEngine {
 
     for (const token of tokensToQuote) {
       const book = books.get(token.tokenId);
-      if (!book) continue;
+      if (!book) {
+        this.logger.warn(`No book for token ${token.tokenId.slice(0, 16)}…, skipping quote`);
+        continue;
+      }
 
       const budget = tokenBudgets.get(token.tokenId) ?? this.config.orderSize;
       const quote = this.generateTokenBuyQuote(
@@ -65,6 +68,12 @@ export class QuoteEngine {
         budget,
       );
       if (quote) quotes.push(quote);
+    }
+
+    if (quotes.length === 0 && tokensToQuote.length > 0) {
+      this.logger.warn(
+        `No quotable tokens for ${market.question.slice(0, 30)}… (maxSpread=${maxSpread}, tick=${market.tickSize})`,
+      );
     }
 
     return quotes;
