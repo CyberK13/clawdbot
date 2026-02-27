@@ -511,6 +511,7 @@ export class MmEngine {
 
       if (this.stateMgr.get().errorCount > 5) {
         this.logger.error("Too many errors, cancelling all orders as safety measure");
+        this.dangerTriggers.clear(); // P49: no orders → no triggers
         await this.orderMgr.cancelAllOrders();
       }
     }
@@ -998,6 +999,7 @@ export class MmEngine {
 
     if (st.dailyPnl < -this.config.maxDailyLoss) {
       // P43: await cancel so orders are actually removed before declaring paused
+      this.dangerTriggers.clear(); // P49: no orders → no triggers
       await this.orderMgr.cancelAllOrders();
       this.stateMgr.update({ dayPaused: true });
       this.logger.warn(`日亏损 ${fmtUsd(st.dailyPnl)} > 限额 $${this.config.maxDailyLoss}, 暂停`);
