@@ -124,7 +124,14 @@ export class MmEngine {
 
     // Market scan
     await this.scanner.scan();
-    this.activeMarkets = this.scanner.selectActiveMarkets(this.stateMgr.get().pausedMarkets);
+    const pausedList = this.stateMgr.get().pausedMarkets;
+    this.activeMarkets = this.scanner.selectActiveMarkets(pausedList);
+    if (pausedList.length > 0) {
+      this.logger.info(`Filtering ${pausedList.length} paused markets`);
+    }
+    for (const mkt of this.activeMarkets) {
+      this.logger.info(`✅ Active: ${mkt.question.slice(0, 50)}… ($${mkt.rewardsDailyRate}/d)`);
+    }
     const activeIds = this.activeMarkets.map((m) => m.conditionId);
 
     // Sell orphan positions from non-active markets BEFORE pruning
@@ -332,6 +339,15 @@ export class MmEngine {
             }
             // GTD refresh: re-place orders 30s before expiry
             else if (this.needsRefresh(ms)) {
+              // P29: Orders survived a full GTD cycle without danger zone — market is stable.
+              // Reset consecutiveCooldowns so the 3-strike counter starts fresh.
+              if (ms.consecutiveCooldowns > 0) {
+                this.logger.info(
+                  `${mkt.question.slice(0, 30)}… 单子存活至GTD刷新, 重置冷却计数 (was ${ms.consecutiveCooldowns})`,
+                );
+                ms.consecutiveCooldowns = 0;
+                this.stateMgr.setMarketState(mkt.conditionId, ms);
+              }
               await this.refreshQuotes(mkt, ms);
             }
             break;
@@ -350,20 +366,17 @@ export class MmEngine {
                 this.stateMgr.update({ pausedMarkets: paused });
                 this.stateMgr.removeMarketState(mkt.conditionId);
                 await this.rescanMarketsInternal();
-              } else if (this.isSafeToQuote(mkt, ms)) {
+              } else {
+                // P29: Resume quoting after cooldown. DON'T reset consecutiveCooldowns
+                // here — it resets only when orders survive a full GTD cycle (see
+                // needsRefresh path). This lets the counter accumulate if we keep
+                // bouncing between quoting and cooldown.
                 ms.phase = "quoting";
-                ms.consecutiveCooldowns = 0;
                 ms.lastCooldownMids = undefined;
                 this.stateMgr.setMarketState(mkt.conditionId, ms);
                 await this.placeQuotes(mkt, ms);
-                this.logger.info(`✅ ${mkt.question.slice(0, 30)}… 冷却结束, 重新报价`);
-              } else {
-                // Mid still unstable — extend cooldown, count as another consecutive
-                ms.cooldownUntil = Date.now() + this.config.cooldownMs;
-                ms.consecutiveCooldowns = (ms.consecutiveCooldowns || 0) + 1;
-                this.stateMgr.setMarketState(mkt.conditionId, ms);
                 this.logger.info(
-                  `⏳ ${mkt.question.slice(0, 30)}… mid仍危险, 延长冷却 (连续第${ms.consecutiveCooldowns}次)`,
+                  `✅ ${mkt.question.slice(0, 30)}… 冷却结束, 重新报价 (累计冷却${ms.consecutiveCooldowns}次)`,
                 );
               }
             }
@@ -508,19 +521,17 @@ export class MmEngine {
     await this.orderMgr.cancelMarketOrders(mkt.conditionId);
   }
 
-  private isSafeToQuote(mkt: MmMarket, ms: MarketState): boolean {
-    // Check if mid has stabilized since cooldown entry
-    // If mid moved more than dangerSpread during cooldown, still volatile
-    if (ms.lastCooldownMids) {
-      const dangerSpread = mkt.rewardsMaxSpread * this.config.dangerSpreadRatio;
-      for (const token of mkt.tokens) {
-        const mid = this.priceMap.get(token.tokenId);
-        const cooldownMid = ms.lastCooldownMids[token.tokenId];
-        if (mid && cooldownMid && Math.abs(mid - cooldownMid) > dangerSpread) {
-          return false;
-        }
-      }
-    }
+  private isSafeToQuote(_mkt: MmMarket, _ms: MarketState): boolean {
+    // P29: Always return true after cooldown expires.
+    // Old logic checked if mid was "stable" during cooldown, but this was
+    // self-defeating — the very markets that trigger danger zone ALWAYS have
+    // moving mids, so isSafeToQuote almost always returned false, leading to
+    // inevitable 3-consecutive-cooldown market pauses.
+    //
+    // New approach: let placeQuotes + isInDangerZone handle safety. New orders
+    // are placed at targetSpread from CURRENT mid, which is inherently safe.
+    // If market is still volatile, danger zone triggers again quickly and
+    // consecutiveCooldowns increments organically.
     return true;
   }
 
@@ -836,7 +847,13 @@ export class MmEngine {
 
   private async rescanMarketsInternal(): Promise<number> {
     await this.scanner.scan();
-    const newMarkets = this.scanner.selectActiveMarkets(this.stateMgr.get().pausedMarkets);
+    const pausedList = this.stateMgr.get().pausedMarkets;
+    const newMarkets = this.scanner.selectActiveMarkets(pausedList);
+    if (newMarkets.length > 0) {
+      this.logger.info(
+        `Selected after filter: ${newMarkets.map((m) => m.question.slice(0, 30)).join(", ")}`,
+      );
+    }
 
     // Cancel orders on removed markets
     const removedIds = this.activeMarkets
