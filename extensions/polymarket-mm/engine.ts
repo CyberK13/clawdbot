@@ -357,7 +357,7 @@ export class MmEngine {
           case "cooldown":
             if (Date.now() > ms.cooldownUntil) {
               if ((ms.consecutiveCooldowns || 0) >= 3) {
-                // Too volatile — pause market and rescan for a better one
+                // Too volatile — pause market (blacklist) and rescan for a better one
                 this.logger.warn(
                   `🔄 ${mkt.question.slice(0, 30)}… 连续${ms.consecutiveCooldowns}次冷却, 暂停并切换`,
                 );
@@ -369,17 +369,36 @@ export class MmEngine {
                 this.stateMgr.removeMarketState(mkt.conditionId);
                 await this.rescanMarketsInternal();
               } else {
-                // P29: Resume quoting after cooldown. DON'T reset consecutiveCooldowns
-                // here — it resets only when orders survive a full refresh cycle (see
-                // needsRefresh path). This lets the counter accumulate if we keep
-                // bouncing between quoting and cooldown.
-                ms.phase = "quoting";
-                ms.lastCooldownMids = undefined;
-                this.stateMgr.setMarketState(mkt.conditionId, ms);
-                await this.placeQuotes(mkt, ms);
-                this.logger.info(
-                  `✅ ${mkt.question.slice(0, 30)}… 冷却结束, 重新报价 (累计冷却${ms.consecutiveCooldowns}次)`,
+                // P46: Rescan for better reward markets before resuming.
+                // If a higher-reward market exists, switch to it automatically.
+                // If current market is still among the best, resume quoting on it.
+                try {
+                  await this.rescanMarketsInternal();
+                } catch (err: any) {
+                  this.logger.warn(`P46: Cooldown rescan failed: ${err?.message}`);
+                }
+
+                const stillActive = this.activeMarkets.find(
+                  (m) => m.conditionId === mkt.conditionId,
                 );
+                const newMs = this.stateMgr.getMarketState(mkt.conditionId);
+
+                if (stillActive && newMs) {
+                  // Market still among the best — resume quoting
+                  newMs.phase = "quoting";
+                  newMs.consecutiveCooldowns = ms.consecutiveCooldowns;
+                  newMs.lastCooldownMids = undefined;
+                  this.stateMgr.setMarketState(mkt.conditionId, newMs);
+                  await this.placeQuotes(stillActive, newMs);
+                  this.logger.info(
+                    `✅ ${mkt.question.slice(0, 30)}… 冷却结束, 重新报价 (累计冷却${ms.consecutiveCooldowns}次)`,
+                  );
+                } else {
+                  // Replaced by higher-reward market
+                  this.logger.info(
+                    `🔄 ${mkt.question.slice(0, 30)}… ($${mkt.rewardsDailyRate}/d) 冷却后发现更优奖励市场, 已切换`,
+                  );
+                }
               }
             }
             break;
