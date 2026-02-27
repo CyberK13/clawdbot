@@ -68,6 +68,14 @@ export class MmEngine {
 
   private clientOpts: ClientOptions;
 
+  /** Optional TG notification callback — set via setNotifier() from plugin index. */
+  private notifyTg?: (text: string) => void;
+
+  /** Set a TG notification callback for proactive alerts (fill, danger cancel, kill). */
+  setNotifier(fn: (text: string) => void): void {
+    this.notifyTg = fn;
+  }
+
   constructor(
     clientOpts: ClientOptions,
     stateDir: string,
@@ -285,6 +293,7 @@ export class MmEngine {
     }
 
     this.logger.error(`🚨 KILL SWITCH: ${reason}`);
+    this.notifyTg?.(`🚨 KILL SWITCH!\n${reason}`);
 
     // P47: Wait for in-flight tick
     if (this.tickPromise) {
@@ -635,10 +644,12 @@ export class MmEngine {
     }
 
     this.stateMgr.setMarketState(mkt.conditionId, ms);
-    this.logger.warn(
-      `⚠️ 危险区 (${source}): ${mkt.question.slice(0, 30)}… → 冷却${this.config.cooldownMs / 1000}s` +
-        ` (连续第${ms.consecutiveCooldowns}次)`,
-    );
+    const cooldownMsg =
+      `⚠️ 危险区撤单 (${source})\n` +
+      `${mkt.question.slice(0, 40)}…\n` +
+      `冷却${this.config.cooldownMs / 1000}s (连续第${ms.consecutiveCooldowns}次)`;
+    this.logger.warn(cooldownMsg);
+    this.notifyTg?.(cooldownMsg);
 
     // Async cancel AFTER state is set — safe because phase is already "cooldown"
     await this.orderMgr.cancelMarketOrders(mkt.conditionId);
@@ -762,10 +773,13 @@ export class MmEngine {
       return;
     }
 
-    this.logger.warn(
-      `🚨 Fill: ${order.side} ${fillSize.toFixed(1)} @ ${order.price.toFixed(3)} ` +
-        `(${market.question.slice(0, 30)}…) — 立即清仓`,
-    );
+    const fillMsg =
+      `🚨 意外成交!\n` +
+      `${order.side} ${fillSize.toFixed(1)} @ ${order.price.toFixed(3)}\n` +
+      `${market.question.slice(0, 40)}…\n` +
+      `💰 价值: $${(fillSize * order.price).toFixed(2)} — 立即清仓`;
+    this.logger.warn(fillMsg);
+    this.notifyTg?.(fillMsg);
 
     // 1. Cancel ALL orders for this market
     this.clearDangerTriggers(market); // P49: no active orders → no triggers
@@ -815,9 +829,13 @@ export class MmEngine {
     this.stateMgr.setMarketState(ms.conditionId, ms);
 
     if (sold) {
-      this.logger.info(`✅ 清仓成功, 进入冷却`);
+      const msg = `✅ 清仓成功, 进入冷却${this.config.cooldownMs / 1000}s`;
+      this.logger.info(msg);
+      this.notifyTg?.(msg);
     } else {
-      this.logger.error(`❌ 清仓失败, 需要 /mm sell 手动清理`);
+      const msg = `❌ 清仓失败! 需要 /mm sell 手动清理`;
+      this.logger.error(msg);
+      this.notifyTg?.(msg);
     }
   }
 
@@ -1024,7 +1042,9 @@ export class MmEngine {
       this.dangerTriggers.clear(); // P49: no orders → no triggers
       await this.orderMgr.cancelAllOrders();
       this.stateMgr.update({ dayPaused: true });
-      this.logger.warn(`日亏损 ${fmtUsd(st.dailyPnl)} > 限额 $${this.config.maxDailyLoss}, 暂停`);
+      const pauseMsg = `⏸️ 日亏损 ${fmtUsd(st.dailyPnl)} > 限额 $${this.config.maxDailyLoss}, 今日暂停`;
+      this.logger.warn(pauseMsg);
+      this.notifyTg?.(pauseMsg);
     }
   }
 

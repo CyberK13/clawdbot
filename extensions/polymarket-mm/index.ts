@@ -12,6 +12,7 @@ import type {
   OpenClawPluginToolFactory,
   AnyAgentTool,
 } from "../../src/plugins/types.js";
+import { sendMessageTelegram } from "../../src/telegram/send.js";
 import { formatConfig, resolveConfig } from "./config.js";
 import { MmEngine } from "./engine.js";
 import { createMmCommandHandler } from "./telegram-commands.js";
@@ -46,6 +47,14 @@ export default function register(api: OpenClawPluginApi) {
         cfg,
         ctx.logger,
       );
+
+      // Wire TG proactive notifications (fill, danger cancel, kill switch)
+      const tgChatId = process.env.MM_TG_NOTIFY_CHAT || "6309937609";
+      engine.setNotifier((text) => {
+        sendMessageTelegram(tgChatId, text).catch((err) => {
+          ctx.logger.error(`TG notify failed: ${err?.message}`);
+        });
+      });
 
       engine.startDashboard();
 
@@ -99,6 +108,10 @@ export default function register(api: OpenClawPluginApi) {
           api.pluginConfig as Partial<MmConfig> | undefined,
           api.logger,
         );
+        const chatId = process.env.MM_TG_NOTIFY_CHAT || "6309937609";
+        engine.setNotifier((text) => {
+          sendMessageTelegram(chatId, text).catch(() => {});
+        });
       }
 
       const handler = createMmCommandHandler(engine);
