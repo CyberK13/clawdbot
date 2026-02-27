@@ -25,7 +25,10 @@ export class OrderManager {
    * Refresh orders for a market: compare targets with live orders,
    * cancel stale ones, place new ones.
    */
-  async refreshMarketOrders(market: MmMarket, targets: TargetQuote[]): Promise<string[]> {
+  async refreshMarketOrders(
+    market: MmMarket,
+    targets: TargetQuote[],
+  ): Promise<{ allIds: string[]; newlyPlaced: number }> {
     const liveOrders = this.state.getMarketOrders(market.conditionId);
     const tick = parseFloat(market.tickSize);
 
@@ -78,7 +81,7 @@ export class OrderManager {
       if (tracked) placedIds.push(tracked.orderId);
     }
 
-    return [...survivingIds, ...placedIds];
+    return { allIds: [...survivingIds, ...placedIds], newlyPlaced: placedIds.length };
   }
 
   /** Place a single limit order. BUY uses GTD 5min for crash protection. */

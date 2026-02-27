@@ -583,28 +583,34 @@ export class MmEngine {
     }
 
     this.currentQuotes.set(mkt.conditionId, quotes);
-    const placedIds = await this.orderMgr.refreshMarketOrders(mkt, quotes);
+    const { allIds, newlyPlaced } = await this.orderMgr.refreshMarketOrders(mkt, quotes);
 
     // Race guard: WS danger zone may have fired during the await above,
     // changing ms.phase to "cooldown". If so, cancel the orphan orders.
     if (ms.phase !== "quoting") {
-      if (placedIds.length > 0) {
+      if (allIds.length > 0) {
         this.logger.info(
-          `Race detected: phase=${ms.phase} after placeQuotes, cancelling ${placedIds.length} orphans`,
+          `Race detected: phase=${ms.phase} after placeQuotes, cancelling ${allIds.length} orphans`,
         );
         try {
-          await this.client.cancelOrders(placedIds);
+          await this.client.cancelOrders(allIds);
         } catch (err: any) {
           this.logger.warn(`P32: Race cancel failed: ${err?.message}`);
         }
-        for (const id of placedIds) this.stateMgr.removeOrder(id);
+        for (const id of allIds) this.stateMgr.removeOrder(id);
       }
       return;
     }
 
-    ms.activeOrderIds = placedIds;
-    // GTD 5min = 300s effective after 60s buffer
-    ms.ordersExpireAt = Date.now() + 300_000;
+    ms.activeOrderIds = allIds;
+    // P44: Only reset expiry when ALL orders are fresh (no survivors from previous cycle).
+    // Surviving orders keep their original exchange expiry — resetting would create a gap
+    // where we think orders are still live but they've already expired on exchange.
+    // GTD actual exchange expiry = now + 60s buffer + 300s = 360s total.
+    const hasSurvivors = allIds.length > newlyPlaced;
+    if (!hasSurvivors && newlyPlaced > 0) {
+      ms.ordersExpireAt = Date.now() + 360_000;
+    }
     this.stateMgr.setMarketState(mkt.conditionId, ms);
   }
 
