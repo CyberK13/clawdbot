@@ -306,19 +306,18 @@ export class MmEngine {
       this.logger.error(`P32: cancelAll in emergencyKill failed: ${err?.message}`);
     }
 
+    // P50: Use sellAll's comprehensive path (data-api + on-chain balance check)
+    // instead of liquidateAllPositions which only checks state.positions.
     let liquidated = false;
     if (this.config.liquidateOnKill) {
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          const result = await this.liquidateAllPositions();
-          if (result.failed === 0) {
-            liquidated = true;
-            break;
-          }
-        } catch (err: any) {
-          this.logger.error(`Liquidation attempt ${attempt} failed: ${err.message}`);
+      try {
+        const result = await this.sellAllPositionsOnly();
+        liquidated = result.sold.some((s) => s.ok);
+        if (result.errors.length > 0) {
+          this.logger.error(`Kill liquidation errors: ${result.errors.join("; ")}`);
         }
-        if (attempt < 3) await new Promise((r) => setTimeout(r, 5_000));
+      } catch (err: any) {
+        this.logger.error(`Kill liquidation failed: ${err.message}`);
       }
     }
 
@@ -1091,26 +1090,20 @@ export class MmEngine {
     sold: Array<{ tokenId: string; shares: number; price: number; ok: boolean }>;
     errors: string[];
   }> {
-    const result: Awaited<ReturnType<MmEngine["sellAll"]>> = {
-      stopped: false,
-      sold: [],
-      errors: [],
-    };
-
     // 1. Initialize client if needed
     if (!this.client.initialized) {
       try {
         await this.client.init();
       } catch (err: any) {
-        result.errors.push(`Client init failed: ${err.message}`);
-        return result;
+        return { stopped: false, sold: [], errors: [`Client init failed: ${err.message}`] };
       }
     }
 
     // 2. Stop engine if running
+    let stopped = false;
     if (this.running) {
       await this.stop("sellAll — unconditional liquidation");
-      result.stopped = true;
+      stopped = true;
     }
 
     // 3. Cancel ALL open orders (belt & suspenders)
@@ -1119,9 +1112,27 @@ export class MmEngine {
     await new Promise((r) => setTimeout(r, 2_000));
     try {
       await this.client.cancelAll();
-    } catch (err: any) {
-      result.errors.push(`Cancel-all failed (non-fatal): ${err.message}`);
-    }
+    } catch {}
+
+    // 4. Sell everything via shared core
+    const core = await this.sellAllPositionsOnly();
+    return { stopped, ...core };
+  }
+
+  /**
+   * P50: Core sell-all logic — collect ALL tokens (state + scanner + data-api),
+   * check on-chain balance, FAK sell everything.
+   * Shared by sellAll() and emergencyKill().
+   * Does NOT stop engine or cancel orders — caller handles that.
+   */
+  private async sellAllPositionsOnly(): Promise<{
+    sold: Array<{ tokenId: string; shares: number; price: number; ok: boolean }>;
+    errors: string[];
+  }> {
+    const result: {
+      sold: Array<{ tokenId: string; shares: number; price: number; ok: boolean }>;
+      errors: string[];
+    } = { sold: [], errors: [] };
 
     // 4. Collect all known token IDs
     const tokenSet = new Map<string, string>(); // tokenId → conditionId
