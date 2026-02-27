@@ -113,7 +113,7 @@ export class MmEngine {
     );
 
     // P18 fix: Cancel any lingering exchange orders and clear stale tracked orders on startup
-    // Old orders from previous session may have expired (GTD) or been orphaned.
+    // Old orders from previous session may have been orphaned.
     try {
       await this.client.cancelAll();
       this.logger.info("Startup: cancelled all lingering exchange orders");
@@ -154,7 +154,7 @@ export class MmEngine {
           phase: "quoting",
           cooldownUntil: 0,
           activeOrderIds: [],
-          ordersExpireAt: 0,
+          ordersPlacedAt: 0,
           consecutiveCooldowns: 0,
         });
       }
@@ -339,13 +339,13 @@ export class MmEngine {
             if (this.isInDangerZone(mkt, ms)) {
               await this.enterCooldown(mkt, ms, "REST fallback");
             }
-            // GTD refresh: re-place orders 30s before expiry
+            // P45: Periodic refresh for price drift (GTC orders stay on exchange)
             else if (this.needsRefresh(ms)) {
-              // P29: Orders survived a full GTD cycle without danger zone — market is stable.
+              // Orders survived 5min without danger zone — market is stable.
               // Reset consecutiveCooldowns so the 3-strike counter starts fresh.
               if (ms.consecutiveCooldowns > 0) {
                 this.logger.info(
-                  `${mkt.question.slice(0, 30)}… 单子存活至GTD刷新, 重置冷却计数 (was ${ms.consecutiveCooldowns})`,
+                  `${mkt.question.slice(0, 30)}… 挂单稳定5min, 重置冷却计数 (was ${ms.consecutiveCooldowns})`,
                 );
                 ms.consecutiveCooldowns = 0;
                 this.stateMgr.setMarketState(mkt.conditionId, ms);
@@ -370,7 +370,7 @@ export class MmEngine {
                 await this.rescanMarketsInternal();
               } else {
                 // P29: Resume quoting after cooldown. DON'T reset consecutiveCooldowns
-                // here — it resets only when orders survive a full GTD cycle (see
+                // here — it resets only when orders survive a full refresh cycle (see
                 // needsRefresh path). This lets the counter accumulate if we keep
                 // bouncing between quoting and cooldown.
                 ms.phase = "quoting";
@@ -551,8 +551,9 @@ export class MmEngine {
 
   private needsRefresh(ms: MarketState): boolean {
     if (ms.activeOrderIds.length === 0) return true;
-    // Refresh 30s before GTD expiry
-    if (ms.ordersExpireAt > 0 && Date.now() > ms.ordersExpireAt - 30_000) return true;
+    // P45: GTC orders don't expire — periodic refresh every 5min for price drift.
+    // Orders stay on exchange continuously; refresh only updates prices if mid moved.
+    if (ms.ordersPlacedAt > 0 && Date.now() - ms.ordersPlacedAt > 300_000) return true;
     return false;
   }
 
@@ -603,13 +604,9 @@ export class MmEngine {
     }
 
     ms.activeOrderIds = allIds;
-    // P44: Only reset expiry when ALL orders are fresh (no survivors from previous cycle).
-    // Surviving orders keep their original exchange expiry — resetting would create a gap
-    // where we think orders are still live but they've already expired on exchange.
-    // GTD actual exchange expiry = now + 60s buffer + 300s = 360s total.
-    const hasSurvivors = allIds.length > newlyPlaced;
-    if (!hasSurvivors && newlyPlaced > 0) {
-      ms.ordersExpireAt = Date.now() + 360_000;
+    // P45: GTC orders — only update placement timestamp when new orders are placed.
+    if (newlyPlaced > 0) {
+      ms.ordersPlacedAt = Date.now();
     }
     this.stateMgr.setMarketState(mkt.conditionId, ms);
   }
@@ -946,7 +943,7 @@ export class MmEngine {
           phase: "quoting",
           cooldownUntil: 0,
           activeOrderIds: [],
-          ordersExpireAt: 0,
+          ordersPlacedAt: 0,
           consecutiveCooldowns: 0,
         });
       }

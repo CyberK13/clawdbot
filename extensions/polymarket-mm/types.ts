@@ -132,8 +132,8 @@ export interface MarketState {
   phase: MarketPhase;
   cooldownUntil: number;
   activeOrderIds: string[];
-  /** GTD expiration timestamp of current orders (for refresh) */
-  ordersExpireAt: number;
+  /** Timestamp when orders were last placed/refreshed (for periodic price-drift refresh) */
+  ordersPlacedAt: number;
   accidentalFill?: AccidentalFill;
   /** Consecutive cooldown entries without successful quoting (for P5 volatility detection) */
   consecutiveCooldowns: number;

@@ -2,7 +2,6 @@
 // Order Manager — v5 simplified: place, cancel, refresh, detect fills
 // ---------------------------------------------------------------------------
 
-import type { TickSize } from "@polymarket/clob-client";
 import { OrderType, Side } from "@polymarket/clob-client";
 import type { PluginLogger } from "../../src/plugins/types.js";
 import type { PolymarketClient } from "./client.js";
@@ -84,25 +83,19 @@ export class OrderManager {
     return { allIds: [...survivingIds, ...placedIds], newlyPlaced: placedIds.length };
   }
 
-  /** Place a single limit order. BUY uses GTD 5min for crash protection. */
+  /** Place a single GTC limit order. Danger zone + shutdown handler provide safety. */
   async placeOrder(market: MmMarket, target: TargetQuote): Promise<TrackedOrder | null> {
     try {
-      const isBuy = target.side === "BUY";
-      const orderType = isBuy ? OrderType.GTD : OrderType.GTC;
-      // GTD 5min: API has 60s security buffer, so +60+300 = 5min effective
-      const expiration = isBuy ? Math.floor(Date.now() / 1000) + 60 + 300 : undefined;
-
       const result = await this.client.createAndPostOrder(
         {
           tokenID: target.tokenId,
           price: target.price,
           size: target.size,
-          side: isBuy ? Side.BUY : Side.SELL,
+          side: target.side === "BUY" ? Side.BUY : Side.SELL,
           feeRateBps: 0,
-          ...(expiration ? { expiration } : {}),
         },
         { tickSize: market.tickSize, negRisk: market.negRisk },
-        orderType,
+        OrderType.GTC,
         true, // postOnly
       );
 
@@ -136,7 +129,7 @@ export class OrderManager {
       this.state.trackOrder(tracked);
       this.logger.info(
         `📝 Placed ${target.side} ${target.size.toFixed(1)} @ ${target.price.toFixed(4)} ` +
-          `(${orderId.slice(0, 12)}… ${isBuy ? "GTD 5min" : "GTC"})`,
+          `(${orderId.slice(0, 12)}… GTC)`,
       );
       return tracked;
     } catch (err: any) {
