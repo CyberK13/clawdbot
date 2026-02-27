@@ -89,6 +89,7 @@ export class WsFeed {
   private subscribedTokens: string[] = [];
 
   private processedTrades = new Set<string>();
+  private marketParseErrors = 0;
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
   private fillQueue: Promise<void> = Promise.resolve();
 
@@ -119,8 +120,11 @@ export class WsFeed {
     this.connectMarket();
 
     this.pruneTimer = setInterval(() => {
+      // P43: Keep recent 500 entries instead of clearing all — prevents duplicate
+      // fill processing when a trade ID is re-delivered right after pruning.
       if (this.processedTrades.size > 1000) {
-        this.processedTrades.clear();
+        const entries = [...this.processedTrades];
+        this.processedTrades = new Set(entries.slice(-500));
       }
     }, 300_000);
   }
@@ -349,7 +353,11 @@ export class WsFeed {
         const msg = JSON.parse(data.toString());
         this.handleMarketMessage(msg);
       } catch (err: any) {
-        // Silently ignore parse errors on market channel (high frequency)
+        // P43: Log parse errors (throttled) — silent failure hides channel death
+        this.marketParseErrors = (this.marketParseErrors || 0) + 1;
+        if (this.marketParseErrors <= 3 || this.marketParseErrors % 100 === 0) {
+          this.logger.warn(`WS/market parse error #${this.marketParseErrors}: ${err?.message}`);
+        }
       }
     });
 

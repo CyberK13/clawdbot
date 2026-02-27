@@ -2,7 +2,7 @@
 // Persistent state management — v5 simplified
 // ---------------------------------------------------------------------------
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { PluginLogger } from "../../src/plugins/types.js";
 import type { MmState, TrackedOrder, Position, FillEvent, MarketState } from "./types.js";
@@ -278,7 +278,10 @@ export class StateManager {
     try {
       const dir = dirname(this.filePath);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      writeFileSync(this.filePath, JSON.stringify(this.state, null, 2), "utf-8");
+      // P43: Atomic write — write to tmp then rename to prevent corruption on crash
+      const tmpPath = this.filePath + ".tmp";
+      writeFileSync(tmpPath, JSON.stringify(this.state, null, 2), "utf-8");
+      renameSync(tmpPath, this.filePath);
       this.dirty = false;
     } catch (err: any) {
       this.logger.error(`Failed to save state: ${err.message}`);

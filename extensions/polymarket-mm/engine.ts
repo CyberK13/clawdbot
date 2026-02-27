@@ -405,7 +405,7 @@ export class MmEngine {
       }
 
       // 4. Simple risk: drawdown check
-      this.checkSimpleRisk();
+      await this.checkSimpleRisk();
 
       // 5. Periodic tasks
       // Every 12 ticks (60s): reward scoring
@@ -826,11 +826,15 @@ export class MmEngine {
       return;
     }
 
-    // Batch fetch midpoints
+    // Batch fetch midpoints — P43: log failure, critical for negRisk markets
     let midpoints: any = {};
+    let midpointFetchFailed = false;
     try {
       midpoints = await this.client.getMidpoints(bookParams);
-    } catch {}
+    } catch (err: any) {
+      midpointFetchFailed = true;
+      this.logger.warn(`P43: Midpoint batch fetch failed: ${err?.message}`);
+    }
 
     for (let i = 0; i < allTokens.length; i++) {
       const { tokenId, market } = allTokens[i];
@@ -846,6 +850,14 @@ export class MmEngine {
         trueMid = parseFloat(entry?.mid ?? entry ?? "0");
       } else if (midpoints[tokenId]) {
         trueMid = parseFloat(midpoints[tokenId]?.mid ?? midpoints[tokenId] ?? "0");
+      }
+
+      // P43: For negRisk markets, local book mid is inverted — skip if API failed
+      if (midpointFetchFailed && trueMid === 0 && market.negRisk) {
+        this.logger.warn(
+          `P43: Skipping book update for negRisk token ${tokenId.slice(0, 12)} — no midpoint`,
+        );
+        continue;
       }
 
       if (trueMid > 0 && trueMid < 1) {
@@ -867,7 +879,7 @@ export class MmEngine {
 
   // ---- Risk ----------------------------------------------------------------
 
-  private checkSimpleRisk(): void {
+  private async checkSimpleRisk(): Promise<void> {
     const st = this.stateMgr.get();
     const peak = st.peakBalance || this.cachedBalance;
     if (peak <= 0) return;
@@ -879,14 +891,16 @@ export class MmEngine {
       // P39: Set running=false synchronously before async emergencyKill
       // to prevent tick loop from continuing during shutdown
       this.running = false;
-      this.emergencyKill(
+      // P43: await so liquidation result is not lost
+      await this.emergencyKill(
         `Drawdown ${drawdownPct.toFixed(1)}% > ${this.config.maxDrawdownPercent}%`,
       );
       return;
     }
 
     if (st.dailyPnl < -this.config.maxDailyLoss) {
-      this.orderMgr.cancelAllOrders();
+      // P43: await cancel so orders are actually removed before declaring paused
+      await this.orderMgr.cancelAllOrders();
       this.stateMgr.update({ dayPaused: true });
       this.logger.warn(`日亏损 ${fmtUsd(st.dailyPnl)} > 限额 $${this.config.maxDailyLoss}, 暂停`);
     }

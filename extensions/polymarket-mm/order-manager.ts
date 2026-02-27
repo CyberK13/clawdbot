@@ -48,22 +48,25 @@ export class OrderManager {
       }
     }
 
+    // P43: On cancel failure, keep failed IDs in survivingIds so they retain
+    // danger-zone protection instead of becoming orphan orders.
+    const cancelledIds = new Set<string>();
     if (toCancel.length > 0) {
       try {
         await this.client.cancelOrders(toCancel);
         for (const id of toCancel) {
           this.state.removeOrder(id);
+          cancelledIds.add(id);
         }
       } catch (err: any) {
         this.logger.error(`Failed to cancel orders: ${err.message}`);
+        // Do NOT remove from state — orders may still be live on exchange
       }
     }
 
-    // CC-1: Collect surviving order IDs (matched to targets) so they remain
-    // in activeOrderIds and keep danger-zone protection.
     const survivingIds: string[] = [];
     for (const live of liveOrders) {
-      if (!toCancel.includes(live.orderId)) {
+      if (!cancelledIds.has(live.orderId)) {
         survivingIds.push(live.orderId);
       }
     }
@@ -160,8 +163,17 @@ export class OrderManager {
   async detectFills(): Promise<Array<{ order: TrackedOrder; fillSize: number }>> {
     const fills: Array<{ order: TrackedOrder; fillSize: number }> = [];
 
+    // P43: If getOpenOrders fails, abort entirely — do NOT proceed with empty
+    // data which would falsely mark live orders as disappeared/filled.
+    let openOrders: import("@polymarket/clob-client").OpenOrder[];
     try {
-      const openOrders = await this.client.getOpenOrders();
+      openOrders = await this.client.getOpenOrders();
+    } catch (err: any) {
+      this.logger.error(`Fill detection aborted — getOpenOrders failed: ${err.message}`);
+      return fills;
+    }
+
+    try {
       const trackedOrders = this.state.getTrackedOrders();
 
       const disappearedOrders = trackedOrders.filter(
@@ -265,26 +277,30 @@ export class OrderManager {
   async cancelMarketOrders(conditionId: string): Promise<void> {
     try {
       await this.client.cancelMarketOrders(conditionId);
-      const orders = this.state.getMarketOrders(conditionId);
-      for (const o of orders) {
-        this.state.removeOrder(o.orderId);
-      }
     } catch (err: any) {
+      // P43: Do NOT clear state on failure — orders may still be live
       this.logger.error(`Failed to cancel market orders: ${err.message}`);
+      return;
+    }
+    const orders = this.state.getMarketOrders(conditionId);
+    for (const o of orders) {
+      this.state.removeOrder(o.orderId);
     }
   }
 
   async cancelAllOrders(): Promise<void> {
     try {
       await this.client.cancelAll();
-      const tracked = this.state.getTrackedOrders();
-      for (const o of tracked) {
-        this.state.removeOrder(o.orderId);
-      }
-      this.logger.info("Cancelled ALL orders");
     } catch (err: any) {
+      // P43: Do NOT clear state on failure — orders may still be live
       this.logger.error(`Failed to cancel all orders: ${err.message}`);
+      return;
     }
+    const tracked = this.state.getTrackedOrders();
+    for (const o of tracked) {
+      this.state.removeOrder(o.orderId);
+    }
+    this.logger.info("Cancelled ALL orders");
   }
 
   async cancelSideOrders(conditionId: string, side: "BUY" | "SELL"): Promise<void> {
@@ -294,11 +310,13 @@ export class OrderManager {
     const ids = orders.map((o) => o.orderId);
     try {
       await this.client.cancelOrders(ids);
-      for (const id of ids) {
-        this.state.removeOrder(id);
-      }
     } catch (err: any) {
+      // P43: Do NOT clear state on failure — orders may still be live
       this.logger.error(`Failed to cancel ${side} orders: ${err.message}`);
+      return;
+    }
+    for (const id of ids) {
+      this.state.removeOrder(id);
     }
   }
 
