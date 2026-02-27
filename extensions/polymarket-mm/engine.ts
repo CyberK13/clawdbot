@@ -62,6 +62,7 @@ export class MmEngine {
   /** P49: Pre-computed danger zone thresholds — set at order placement,
    *  WS handler does O(1) lookup + compare instead of searching orders. */
   private dangerTriggers = new Map<string, { cancelBelowMid: number; conditionId: string }>();
+  private _lastTriggerLog?: Map<string, string>;
   /** P49: Fast conditionId→MmMarket lookup for WS cancel path. */
   private marketMap = new Map<string, MmMarket>();
 
@@ -561,17 +562,22 @@ export class MmEngine {
       }
     }
 
-    // Log triggers for debugging
+    // Log triggers only when they change (avoid spamming every tick)
     for (const token of mkt.tokens) {
       const t = this.dangerTriggers.get(token.tokenId);
       if (t) {
-        const currentMid = this.priceMap.get(token.tokenId);
-        this.logger.info(
-          `🎯 P49 ${token.outcome}: cancel if mid ≤ ${t.cancelBelowMid.toFixed(4)}` +
-            (currentMid
-              ? ` (current mid=${currentMid.toFixed(4)}, buffer=${(currentMid - t.cancelBelowMid).toFixed(4)})`
-              : ""),
-        );
+        const key = `${token.tokenId}:${t.cancelBelowMid.toFixed(4)}`;
+        if (this._lastTriggerLog?.get(token.tokenId) !== key) {
+          if (!this._lastTriggerLog) this._lastTriggerLog = new Map();
+          this._lastTriggerLog.set(token.tokenId, key);
+          const currentMid = this.priceMap.get(token.tokenId);
+          this.logger.info(
+            `🎯 P49 ${token.outcome}: cancel if mid ≤ ${t.cancelBelowMid.toFixed(4)}` +
+              (currentMid
+                ? ` (current mid=${currentMid.toFixed(4)}, buffer=${(currentMid - t.cancelBelowMid).toFixed(4)})`
+                : ""),
+          );
+        }
       }
     }
   }
