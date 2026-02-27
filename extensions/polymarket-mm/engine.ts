@@ -59,6 +59,11 @@ export class MmEngine {
   private lastMidCorrection: Map<string, number> = new Map();
   /** P28 #3: Dedup fill processing — prevents WS+REST double-counting */
   private processedFillKeys = new Set<string>();
+  /** P49: Pre-computed danger zone thresholds — set at order placement,
+   *  WS handler does O(1) lookup + compare instead of searching orders. */
+  private dangerTriggers = new Map<string, { cancelBelowMid: number; conditionId: string }>();
+  /** P49: Fast conditionId→MmMarket lookup for WS cancel path. */
+  private marketMap = new Map<string, MmMarket>();
 
   private clientOpts: ClientOptions;
 
@@ -162,6 +167,12 @@ export class MmEngine {
       }
     }
 
+    // P49: Build fast conditionId→market lookup
+    this.marketMap.clear();
+    for (const mkt of this.activeMarkets) {
+      this.marketMap.set(mkt.conditionId, mkt);
+    }
+
     this.stateMgr.update({
       running: true,
       startedAt: Date.now(),
@@ -189,10 +200,25 @@ export class MmEngine {
       this.logger,
     );
 
-    // Wire market channel → danger zone detection
+    // P49: Wire market channel → pre-computed danger zone (O(1) lookup + compare)
     this.wsFeed.onMidUpdate = (tokenId, newMid) => {
       this.priceMap.set(tokenId, newMid);
-      this.checkDangerZoneForToken(tokenId);
+      const trigger = this.dangerTriggers.get(tokenId);
+      if (trigger && newMid <= trigger.cancelBelowMid) {
+        const mkt = this.marketMap.get(trigger.conditionId);
+        const ms = this.stateMgr.getMarketState(trigger.conditionId);
+        if (mkt && ms?.phase === "quoting") {
+          // Clear trigger immediately to prevent duplicate fires
+          this.dangerTriggers.delete(tokenId);
+          // Also clear sibling token trigger (same market, all orders get cancelled)
+          for (const t of mkt.tokens) {
+            if (t.tokenId !== tokenId) this.dangerTriggers.delete(t.tokenId);
+          }
+          this.enterCooldown(mkt, ms, "WS实时").catch((err) => {
+            this.logger.error(`WS danger cancel failed: ${err.message}`);
+          });
+        }
+      }
     };
 
     this.wsFeed.start(activeIds, allTokenIds);
@@ -234,6 +260,9 @@ export class MmEngine {
       this.wsFeed = null;
     }
 
+    // P49: Clear all danger triggers on stop
+    this.dangerTriggers.clear();
+
     await this.orderMgr.cancelAllOrders();
 
     const shouldLiquidate = liquidate ?? this.config.liquidateOnStop;
@@ -267,6 +296,9 @@ export class MmEngine {
       this.wsFeed.stop();
       this.wsFeed = null;
     }
+
+    // P49: Clear all danger triggers on kill
+    this.dangerTriggers.clear();
 
     try {
       await this.client.cancelAll();
@@ -358,9 +390,9 @@ export class MmEngine {
 
         switch (ms.phase) {
           case "quoting":
-            // REST fallback danger zone check (WS is primary path)
-            if (this.isInDangerZone(mkt, ms)) {
-              await this.enterCooldown(mkt, ms, "REST fallback");
+            // P49: REST fallback — check pre-computed triggers (WS is primary path)
+            if (this.checkDangerTriggersREST(mkt, ms)) {
+              await this.enterCooldown(mkt, ms, "REST兜底");
             }
             // P45: Periodic refresh for price drift (GTC orders stay on exchange)
             else if (this.needsRefresh(ms)) {
@@ -486,70 +518,96 @@ export class MmEngine {
     this.scheduleLoop();
   }
 
-  // ---- Danger zone detection (core v5) ------------------------------------
+  // ---- Danger zone detection (core v5, P49 redesign) ---------------------
+  //
+  // Design: thresholds are pre-computed at order placement time.
+  // WS handler does O(1) Map lookup + single comparison → instant cancel.
+  // No searching through markets/states/orders on the hot path.
+  //
+  // For BUY orders at price P with dangerSpread D:
+  //   cancelBelowMid = P + D  (cancel when mid drops toward our buy price)
+  //
+  // REST tick uses the same triggers as a fallback.
 
-  /** WS-triggered real-time danger zone check for a specific token. */
-  private checkDangerZoneForToken(tokenId: string): void {
-    const mkt = this.activeMarkets.find((m) => m.tokens.some((t) => t.tokenId === tokenId));
-    if (!mkt) return;
+  /**
+   * P49: Recompute danger triggers for a market after orders are placed/refreshed.
+   * Called from placeQuotes() and refreshQuotes().
+   */
+  private updateDangerTriggers(mkt: MmMarket, ms: MarketState): void {
+    // Clear old triggers for this market's tokens
+    for (const token of mkt.tokens) {
+      this.dangerTriggers.delete(token.tokenId);
+    }
 
-    const ms = this.stateMgr.getMarketState(mkt.conditionId);
-    if (!ms || ms.phase !== "quoting") return;
+    if (ms.phase !== "quoting" || ms.activeOrderIds.length === 0) return;
 
-    if (this.isInDangerZone(mkt, ms)) {
-      // Fire-and-forget async cancel (WS path must be fast)
-      this.enterCooldown(mkt, ms, "WS real-time").catch((err) => {
-        this.logger.error(`WS danger zone cancel failed: ${err.message}`);
-      });
+    const dangerSpread = mkt.rewardsMaxSpread * this.config.dangerSpreadRatio;
+    const trackedOrders = this.stateMgr.get().trackedOrders;
+
+    for (const orderId of ms.activeOrderIds) {
+      const order = trackedOrders[orderId];
+      if (!order || order.status !== "live") continue;
+
+      // BUY order at price P: danger when mid drops below P + dangerSpread
+      const threshold = order.price + dangerSpread;
+
+      // If multiple orders on same token, use highest threshold (most conservative)
+      const existing = this.dangerTriggers.get(order.tokenId);
+      if (!existing || threshold > existing.cancelBelowMid) {
+        this.dangerTriggers.set(order.tokenId, {
+          cancelBelowMid: threshold,
+          conditionId: mkt.conditionId,
+        });
+      }
+    }
+
+    // Log triggers for debugging
+    for (const token of mkt.tokens) {
+      const t = this.dangerTriggers.get(token.tokenId);
+      if (t) {
+        const currentMid = this.priceMap.get(token.tokenId);
+        this.logger.info(
+          `🎯 P49 ${token.outcome}: cancel if mid ≤ ${t.cancelBelowMid.toFixed(4)}` +
+            (currentMid
+              ? ` (current mid=${currentMid.toFixed(4)}, buffer=${(currentMid - t.cancelBelowMid).toFixed(4)})`
+              : ""),
+        );
+      }
     }
   }
 
-  private isInDangerZone(mkt: MmMarket, ms: MarketState): boolean {
-    for (const orderId of ms.activeOrderIds) {
-      const order = this.stateMgr.get().trackedOrders[orderId];
-      if (!order || order.status !== "live") continue;
-
-      const mid = this.priceMap.get(order.tokenId);
-      if (!mid) {
-        // P35: No price data for this token — treat as dangerous (conservative).
-        // Better to cancel than to leave an unprotected order on the book.
-        return true;
-      }
-
-      // 1. Classic mid-distance check
-      const distance = Math.abs(mid - order.price);
-      const dangerSpread = mkt.rewardsMaxSpread * this.config.dangerSpreadRatio;
-      if (distance < dangerSpread) return true;
-
-      // 2. P27: Book-depth cushion check — protects against aggressive taker sweeps.
-      // If there isn't enough bid liquidity between our order and mid, a taker can
-      // sweep straight through to us regardless of mid position.
-      if (this.config.minCushionRatio > 0) {
-        const book = this.books.get(order.tokenId);
-        if (book) {
-          const cushion = this.measureCushion(book, order.price, mid);
-          const minCushion = this.config.orderSize * this.config.minCushionRatio;
-          if (cushion < minCushion) return true;
-        }
-      }
+  /** Clear all danger triggers for a market (cooldown, stop, etc.) */
+  private clearDangerTriggers(mkt: MmMarket): void {
+    for (const token of mkt.tokens) {
+      this.dangerTriggers.delete(token.tokenId);
     }
-    return false;
   }
 
   /**
-   * P27: Measure the USD value of bids sitting between our order price and mid.
-   * These bids act as a cushion — a taker must fill them before reaching us.
-   * Excludes orders at our exact price level (likely our own order).
+   * REST fallback: check pre-computed triggers against current priceMap.
+   * Used in tick() as backup when WS is lagging or disconnected.
    */
-  private measureCushion(book: BookSnapshot, orderPrice: number, mid: number): number {
-    let cushionUsd = 0;
-    for (const bid of book.bids) {
-      // Only count bids strictly above our price and below mid
-      if (bid.price > orderPrice + 0.001 && bid.price < mid) {
-        cushionUsd += bid.size * bid.price;
+  private checkDangerTriggersREST(mkt: MmMarket, ms: MarketState): boolean {
+    if (ms.phase !== "quoting") return false;
+
+    for (const token of mkt.tokens) {
+      const trigger = this.dangerTriggers.get(token.tokenId);
+      if (!trigger) {
+        // P35: No trigger means no order on this token — but if there ARE
+        // activeOrderIds and no trigger, something is wrong. Be conservative.
+        const hasOrder = ms.activeOrderIds.some((id) => {
+          const o = this.stateMgr.get().trackedOrders[id];
+          return o?.tokenId === token.tokenId && o.status === "live";
+        });
+        if (hasOrder) return true; // No trigger but has order → dangerous
+        continue;
       }
+
+      const mid = this.priceMap.get(token.tokenId);
+      if (!mid) return true; // P35: No price data → conservative cancel
+      if (mid <= trigger.cancelBelowMid) return true;
     }
-    return cushionUsd;
+    return false;
   }
 
   private async enterCooldown(mkt: MmMarket, ms: MarketState, source: string): Promise<void> {
@@ -559,6 +617,9 @@ export class MmEngine {
     ms.cooldownUntil = Date.now() + this.config.cooldownMs;
     ms.activeOrderIds = [];
     ms.consecutiveCooldowns = (ms.consecutiveCooldowns || 0) + 1;
+
+    // P49: Clear pre-computed triggers (no orders → no danger zone needed)
+    this.clearDangerTriggers(mkt);
 
     // Record mids at cooldown entry for stability check
     ms.lastCooldownMids = {};
@@ -575,20 +636,6 @@ export class MmEngine {
 
     // Async cancel AFTER state is set — safe because phase is already "cooldown"
     await this.orderMgr.cancelMarketOrders(mkt.conditionId);
-  }
-
-  private isSafeToQuote(_mkt: MmMarket, _ms: MarketState): boolean {
-    // P29: Always return true after cooldown expires.
-    // Old logic checked if mid was "stable" during cooldown, but this was
-    // self-defeating — the very markets that trigger danger zone ALWAYS have
-    // moving mids, so isSafeToQuote almost always returned false, leading to
-    // inevitable 3-consecutive-cooldown market pauses.
-    //
-    // New approach: let placeQuotes + isInDangerZone handle safety. New orders
-    // are placed at targetSpread from CURRENT mid, which is inherently safe.
-    // If market is still volatile, danger zone triggers again quickly and
-    // consecutiveCooldowns increments organically.
-    return true;
   }
 
   private needsRefresh(ms: MarketState): boolean {
@@ -642,6 +689,8 @@ export class MmEngine {
         }
         for (const id of allIds) this.stateMgr.removeOrder(id);
       }
+      // P49: Triggers already cleared by enterCooldown, but ensure clean state
+      this.clearDangerTriggers(mkt);
       return;
     }
 
@@ -651,6 +700,9 @@ export class MmEngine {
       ms.ordersPlacedAt = Date.now();
     }
     this.stateMgr.setMarketState(mkt.conditionId, ms);
+
+    // P49: Pre-compute danger zone thresholds for WS instant-cancel
+    this.updateDangerTriggers(mkt, ms);
   }
 
   private async refreshQuotes(mkt: MmMarket, ms: MarketState): Promise<void> {
@@ -710,6 +762,7 @@ export class MmEngine {
     );
 
     // 1. Cancel ALL orders for this market
+    this.clearDangerTriggers(market); // P49: no active orders → no triggers
     await this.orderMgr.cancelMarketOrders(market.conditionId);
     ms.activeOrderIds = [];
 
@@ -964,18 +1017,26 @@ export class MmEngine {
     }
 
     // Cancel orders on removed markets
-    const removedIds = this.activeMarkets
-      .filter((m) => !newMarkets.find((n) => n.conditionId === m.conditionId))
-      .map((m) => m.conditionId);
+    const oldMarkets = this.activeMarkets;
+    const removedMarkets = oldMarkets.filter(
+      (m) => !newMarkets.find((n) => n.conditionId === m.conditionId),
+    );
 
-    for (const id of removedIds) {
-      await this.orderMgr.cancelMarketOrders(id);
-      this.stateMgr.removeMarketState(id);
+    for (const mkt of removedMarkets) {
+      this.clearDangerTriggers(mkt); // P49: clear triggers before cancel
+      await this.orderMgr.cancelMarketOrders(mkt.conditionId);
+      this.stateMgr.removeMarketState(mkt.conditionId);
     }
 
     this.activeMarkets = newMarkets;
     const newIds = newMarkets.map((m) => m.conditionId);
     const allTokenIds = newMarkets.flatMap((m) => m.tokens.map((t) => t.tokenId));
+
+    // P49: Rebuild marketMap
+    this.marketMap.clear();
+    for (const mkt of newMarkets) {
+      this.marketMap.set(mkt.conditionId, mkt);
+    }
 
     // Initialize market states for new markets
     for (const mkt of newMarkets) {
