@@ -46,6 +46,8 @@ export class MmEngine {
   private logger: PluginLogger;
   private running = false;
   private loopHandle: ReturnType<typeof setTimeout> | null = null;
+  /** P47: Track in-flight tick so stop() can await its completion. */
+  private tickPromise: Promise<void> | null = null;
   private tickCount = 0;
   private dashboard: DashboardServer | null = null;
 
@@ -217,6 +219,16 @@ export class MmEngine {
 
     this.logger.info(`Stopping MM: ${reason}`);
 
+    // P47: Wait for in-flight tick to complete before cancelling orders.
+    // Without this, async operations (rescan→placeQuotes) can place GTC orders
+    // AFTER cancelAll, creating orphan orders on the exchange.
+    if (this.tickPromise) {
+      this.logger.info("Waiting for in-flight tick to complete...");
+      try {
+        await this.tickPromise;
+      } catch {}
+    }
+
     if (this.wsFeed) {
       this.wsFeed.stop();
       this.wsFeed = null;
@@ -243,6 +255,13 @@ export class MmEngine {
     }
 
     this.logger.error(`🚨 KILL SWITCH: ${reason}`);
+
+    // P47: Wait for in-flight tick
+    if (this.tickPromise) {
+      try {
+        await this.tickPromise;
+      } catch {}
+    }
 
     if (this.wsFeed) {
       this.wsFeed.stop();
@@ -302,7 +321,11 @@ export class MmEngine {
 
   private scheduleLoop(): void {
     if (!this.running) return;
-    this.loopHandle = setTimeout(() => this.tick(), 5_000);
+    this.loopHandle = setTimeout(() => {
+      this.tickPromise = this.tick().finally(() => {
+        this.tickPromise = null;
+      });
+    }, 5_000);
   }
 
   private async tick(): Promise<void> {
@@ -1028,6 +1051,9 @@ export class MmEngine {
     }
 
     // 3. Cancel ALL open orders (belt & suspenders)
+    //    Wait briefly for any in-flight async order placements to land,
+    //    then cancel. GTC orders from async placeQuotes can land after stop().
+    await new Promise((r) => setTimeout(r, 2_000));
     try {
       await this.client.cancelAll();
     } catch (err: any) {
@@ -1055,6 +1081,28 @@ export class MmEngine {
           tokenSet.set(t.tokenId, mkt.conditionId);
         }
       }
+    }
+
+    // P48: Query Polymarket data-api for ALL positions on proxy wallet.
+    // This catches tokens not tracked in state (e.g. NO-side fills, orphan positions).
+    try {
+      const proxyAddr = this.clientOpts.funder;
+      const resp = await fetch(`https://data-api.polymarket.com/positions?user=${proxyAddr}`);
+      if (resp.ok) {
+        const positions: any[] = await resp.json();
+        for (const p of positions) {
+          if (p.asset && parseFloat(p.size || "0") > 0) {
+            if (!tokenSet.has(p.asset)) {
+              tokenSet.set(p.asset, p.conditionId || "unknown");
+              this.logger.info(
+                `sellAll: data-api found extra position: ${p.title?.slice(0, 30) || "?"} ${p.outcome} ${p.size} shares`,
+              );
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      this.logger.warn(`sellAll: data-api query failed (non-fatal): ${err?.message}`);
     }
 
     if (tokenSet.size === 0) {
@@ -1142,7 +1190,12 @@ export class MmEngine {
       }
     }
 
-    // 6. Refresh balance
+    // 6. Final cancel sweep — catch any GTC orders placed by async race conditions
+    try {
+      await this.client.cancelAll();
+    } catch {}
+
+    // 7. Refresh balance
     try {
       this.cachedBalance = await this.client.getBalance();
       this.adjustSizingToBalance(this.cachedBalance);
