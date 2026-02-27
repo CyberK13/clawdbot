@@ -839,15 +839,18 @@ export class MmEngine {
       return false;
     }
 
-    // FAK sell at bestBid with 3 retries
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // P51: FAK sell loop — keep selling until all shares are gone.
+    // FAK only fills available liquidity at bestBid; repeat to eat deeper levels.
+    let totalSold = 0;
+    const maxRounds = 8; // prevent infinite loop
+    for (let round = 0; round < maxRounds; round++) {
       try {
         const book = await this.client.getOrderBook(tokenId);
         const bids = book.bids || [];
         const bestBid = bids.length > 0 ? parseFloat(bids[bids.length - 1].price) : 0;
         if (bestBid <= 0) {
-          this.logger.warn(`No bids for ${tokenId.slice(0, 10)}…, retry ${attempt + 1}/3`);
-          await new Promise((r) => setTimeout(r, 3_000));
+          this.logger.warn(`No bids for ${tokenId.slice(0, 10)}…, round ${round + 1}/${maxRounds}`);
+          if (round < maxRounds - 1) await new Promise((r) => setTimeout(r, 3_000));
           continue;
         }
 
@@ -875,29 +878,43 @@ export class MmEngine {
           `🔥 FAK SELL: ${shares.toFixed(1)} @ ${bestBid.toFixed(3)} (${tokenId.slice(0, 10)}…)`,
         );
 
-        // Update position
-        const pos = this.stateMgr.getPosition(tokenId);
-        if (pos) {
-          this.stateMgr.updatePosition(
-            tokenId,
-            market.conditionId,
-            pos.outcome,
-            shares,
-            bestBid,
-            "SELL",
-          );
+        // P51: Verify remaining balance after FAK
+        await new Promise((r) => setTimeout(r, 2_000)); // settlement delay
+        const remaining = await this.client.getConditionalBalance(tokenId);
+        const sold = shares - remaining;
+        if (sold > 0) totalSold += sold;
+
+        if (remaining <= 0.1) {
+          // Fully sold
+          const pos = this.stateMgr.getPosition(tokenId);
+          if (pos) {
+            this.stateMgr.updatePosition(
+              tokenId,
+              market.conditionId,
+              pos.outcome,
+              totalSold,
+              bestBid,
+              "SELL",
+            );
+          }
+          return true;
         }
-        return true;
+
+        // Still holding shares — update and retry at next bid level
+        this.logger.warn(
+          `FAK partial: sold ${sold.toFixed(1)}, remaining ${remaining.toFixed(1)} — retrying...`,
+        );
+        shares = remaining;
       } catch (err: any) {
         if (
-          attempt < 2 &&
+          round < maxRounds - 1 &&
           (err.message?.includes("balance") || err.message?.includes("allowance"))
         ) {
           await new Promise((r) => setTimeout(r, 5_000));
           continue;
         }
         this.logger.error(`FAK sell failed: ${err.message}`);
-        return false;
+        break;
       }
     }
     return false;
@@ -1195,7 +1212,19 @@ export class MmEngine {
         this.logger.info(`sellAll: found ${shares.toFixed(2)} shares on ${tokenId.slice(0, 12)}…`);
 
         // Get orderbook for best bid
-        const book = await this.client.getOrderBook(tokenId);
+        let book: any;
+        try {
+          book = await this.client.getOrderBook(tokenId);
+        } catch (bookErr: any) {
+          // P51: Resolved/expired markets return 404 — not sellable via CLOB
+          const is404 = bookErr?.message?.includes("404") || bookErr?.status === 404;
+          const label = is404
+            ? "resolved/no-book"
+            : `book-error: ${bookErr?.message?.slice(0, 50)}`;
+          result.sold.push({ tokenId, shares, price: 0, ok: false });
+          result.errors.push(`${label} ${tokenId.slice(0, 12)}… (${shares.toFixed(0)} shares)`);
+          continue;
+        }
         const bids = book.bids || [];
         const bestBid = bids.length > 0 ? parseFloat(bids[bids.length - 1].price) : 0;
 

@@ -214,9 +214,15 @@ async function handleSell(engine: MmEngine): Promise<PluginCommandResult> {
     }
 
     if (result.errors.length > 0) {
-      text += `\n⚠️ ${result.errors.length} 错误:\n`;
-      for (const e of result.errors.slice(0, 3)) {
-        text += `  ${e}\n`;
+      // P51: Separate resolved-market errors from real failures
+      const resolved = result.errors.filter((e) => e.includes("resolved/no-book"));
+      const real = result.errors.filter((e) => !e.includes("resolved/no-book"));
+      if (real.length > 0) {
+        text += `\n⚠️ ${real.length} 失败:\n`;
+        for (const e of real.slice(0, 3)) text += `  ${e}\n`;
+      }
+      if (resolved.length > 0) {
+        text += `\n📋 ${resolved.length} 已结算市场 (无orderbook, 需redeem)`;
       }
     }
 

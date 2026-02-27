@@ -12,17 +12,20 @@ export const DEFAULT_CONFIG: MmConfig = {
   reserveRatio: 0.02,
 
   // Quoting — simple: targetSpread = maxSpread × spreadRatio
-  // P27: increased from 0.35 to 0.55 — place orders deeper in book to reduce
-  // taker-sweep fill risk. Scoring at 0.55: (0.45)² = 20% of max (was 42%).
-  spreadRatio: 0.55,
+  // P27→P51: increased from 0.55 to 0.65 — further from mid to reduce fill risk.
+  // Scoring at 0.65: (0.35)² = 12.25% of max (was 20% at 0.55).
+  // Tradeoff: ~40% less rewards but dramatically fewer accidental fills.
+  spreadRatio: 0.65,
   orderSize: 0, // computed at runtime
   refreshIntervalMs: 10_000,
 
   // Danger zone — core v5: cancel before fill
-  // P29: lowered from 0.40 to 0.20 — 0.40 was too sensitive, caused constant
-  // cooldown loops (0.525c buffer ≈ natural mid noise). At 0.20:
-  // dangerSpread = 0.7c, buffer = (0.55-0.20) × 3.5c = 1.225c — much more stable.
-  dangerSpreadRatio: 0.2, // if |mid - orderPrice| < maxSpread × 0.20 → cancel
+  // P29→P51: increased from 0.20 to 0.35 — bigger buffer between trigger and order.
+  // At spreadRatio=0.65, dangerRatio=0.35:
+  //   buffer(trigger→order) = 0.35 × maxSpread (was 0.20 × maxSpread)
+  //   buffer(mid→trigger)   = (0.65-0.35) × maxSpread = 0.30 × maxSpread
+  // For maxSpread=4.5¢: trigger→order=1.575¢ (was 0.9¢), mid→trigger=1.35¢
+  dangerSpreadRatio: 0.35,
   cooldownMs: 120_000, // 2 minutes cooldown after danger zone cancel
   // P29: disabled cushion check (was 1.5). Unreliable on thin books — REST API
   // doesn't give full depth, causing false triggers. Rely on mid-distance check
@@ -33,7 +36,8 @@ export const DEFAULT_CONFIG: MmConfig = {
   maxConcurrentMarkets: 1,
   minDailyVolume: 100,
   minRewardRate: 50,
-  minBidDepthUsd: 200,
+  // P51: increased from 200 to 500 — thicker books are harder to sweep through
+  minBidDepthUsd: 500,
 
   // Accidental fill exit (4 stages, minutes)
   accidentalFillTimeouts: [5, 15, 30, 60],
