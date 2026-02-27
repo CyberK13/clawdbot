@@ -126,5 +126,9 @@ export type CyberOracleAction =
   | "hotmoney_by_stock"
   // Data Coverage (1)
   | "data_coverage"
+  // Daily Recap (3)
+  | "daily_recap_latest"
+  | "daily_recap"
+  | "daily_recap_generate"
   // AI Chat (1)
   | "chat";

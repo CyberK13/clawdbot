@@ -122,6 +122,10 @@ const ALL_ACTIONS: CyberOracleAction[] = [
   "hotmoney_traders",
   "hotmoney_by_trader",
   "hotmoney_by_stock",
+  // Daily Recap
+  "daily_recap_latest",
+  "daily_recap",
+  "daily_recap_generate",
   // Misc
   "data_coverage",
   "chat",
@@ -349,6 +353,14 @@ async function dispatch(
     case "hotmoney_by_stock":
       return client.getHotMoneyByStock(params.ts_code, params);
 
+    // --- Daily Recap ---
+    case "daily_recap_latest":
+      return client.getDailyRecapLatest();
+    case "daily_recap":
+      return client.getDailyRecap(params);
+    case "daily_recap_generate":
+      return client.generateDailyRecap();
+
     // --- Misc ---
     case "data_coverage":
       return client.getDataCoverage();
@@ -406,6 +418,7 @@ export default function register(api: OpenClawPluginApi) {
         `- 游资扩展: 游资列表/按游资/按股票(hotmoney_traders/hotmoney_by_trader/hotmoney_by_stock)\n` +
         `- 搜索/数据库: search_stocks, db_tables, db_query\n` +
         `- AI Chat: 自然语言问答(chat)\n` +
+        `- 每日复盘: 最新(daily_recap_latest)、历史(daily_recap)、生成(daily_recap_generate)\n` +
         `- 数据覆盖: data_coverage`,
       parameters: {
         type: "object" as const,
@@ -493,5 +506,96 @@ export default function register(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info("CyberOracle V3 plugin registered (tool: cyberoracle, command: /cy)");
+  // ---------- Command: /fb (A股每日复盘) ------------------------------------
+
+  api.registerCommand({
+    name: "fb",
+    description: "A股每日复盘报告 (CyberOracle)",
+    acceptsArgs: true,
+    requireAuth: true,
+    handler: async (ctx) => {
+      if (!apiKey) {
+        return { text: "CyberOracle 未配置。请设置 CYBERORACLE_API_KEY 环境变量。" };
+      }
+
+      const arg = ctx.args?.trim() ?? "";
+
+      // --- 无参数 / latest → 最新复盘 ---
+      if (!arg || arg === "latest" || arg === "最新") {
+        try {
+          const res = await client.getDailyRecapLatest();
+          return { text: formatRecap(res.data) };
+        } catch (err: any) {
+          return { text: `获取最新复盘失败: ${err.message ?? err}` };
+        }
+      }
+
+      // --- 生成 / generate → 手动触发 ---
+      if (arg === "生成" || arg === "generate") {
+        try {
+          const res = await client.generateDailyRecap();
+          return { text: `复盘报告生成已触发。\n${JSON.stringify(res.data, null, 2)}` };
+        } catch (err: any) {
+          return { text: `触发复盘生成失败: ${err.message ?? err}` };
+        }
+      }
+
+      // --- 历史 [N|日期] ---
+      if (arg.startsWith("历史") || arg.startsWith("history")) {
+        const rest = arg.replace(/^(历史|history)\s*/, "").trim();
+        const params: Record<string, string | number> = {};
+        if (/^\d{4}-\d{2}-\d{2}$/.test(rest)) {
+          params.date = rest;
+        } else if (/^\d+$/.test(rest)) {
+          params.days = Number(rest);
+        } else if (rest) {
+          params.date = rest;
+        }
+        try {
+          const res = await client.getDailyRecap(params as any);
+          return { text: formatRecap(res.data) };
+        } catch (err: any) {
+          return { text: `获取历史复盘失败: ${err.message ?? err}` };
+        }
+      }
+
+      // --- 其他自然语言 → /chat 直通 ---
+      try {
+        const result = await client.chat(`A股复盘相关: ${arg}`);
+        return { text: result.response };
+      } catch (err: any) {
+        return { text: `CyberOracle 查询失败: ${err.message ?? err}` };
+      }
+    },
+  });
+
+  api.logger.info("CyberOracle V3 plugin registered (tool: cyberoracle, commands: /cy, /fb)");
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function formatRecap(data: any): string {
+  if (!data) return "暂无复盘数据。";
+
+  // If it's an array (history), format each entry
+  if (Array.isArray(data)) {
+    if (data.length === 0) return "暂无复盘数据。";
+    return data.map((item: any) => formatSingleRecap(item)).join("\n\n---\n\n");
+  }
+
+  return formatSingleRecap(data);
+}
+
+function formatSingleRecap(item: any): string {
+  if (typeof item === "string") return item;
+  // If the API returns a structured object with a content/report field, use it
+  const text = item.content ?? item.report ?? item.summary ?? item.text ?? item.response;
+  if (typeof text === "string") {
+    const header = item.date ? `📊 ${item.date} A股复盘\n\n` : "";
+    return header + text;
+  }
+  // Fallback: pretty-print JSON
+  return JSON.stringify(item, null, 2);
 }

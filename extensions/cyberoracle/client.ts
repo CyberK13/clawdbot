@@ -547,6 +547,22 @@ export class CyberOracleClient {
   }
 
   // =========================================================================
+  // Daily Recap / 复盘 (3)
+  // =========================================================================
+
+  getDailyRecapLatest() {
+    return this.get("/reports/daily-recap/latest");
+  }
+
+  getDailyRecap(p?: { date?: string; days?: number }) {
+    return this.get("/reports/daily-recap", p as Params);
+  }
+
+  generateDailyRecap() {
+    return this.post("/reports/daily-recap/generate");
+  }
+
+  // =========================================================================
   // AI Chat (1)
   // =========================================================================
 
