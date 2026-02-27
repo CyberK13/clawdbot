@@ -209,7 +209,9 @@ export class RewardTracker {
     const marketData = scores.map((score) => {
       const market = markets.find((m) => m.conditionId === score.conditionId);
       const dailyRate = market?.rewardsDailyRate ?? 0;
-      const estimatedShare = this.estimateOurShare(market!, score.qMin, score.competition);
+      const estimatedShare = market
+        ? this.estimateOurShare(market, score.qMin, score.competition)
+        : 0;
       totalEstDaily += estimatedShare;
 
       return {

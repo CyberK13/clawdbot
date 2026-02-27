@@ -139,6 +139,8 @@ export interface MarketState {
   consecutiveCooldowns: number;
   /** Mid prices when cooldown was entered (for P0 stability check) */
   lastCooldownMids?: Record<string, number>;
+  /** P31: Consecutive ticks where generateQuotes returned empty (silent loop detection) */
+  emptyQuoteTicks?: number;
 }
 
 export interface AccidentalFill {

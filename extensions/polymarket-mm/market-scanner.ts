@@ -228,9 +228,14 @@ export class MarketScanner {
         );
         return null;
       }
-    } catch {
-      // Default high competition: penalize markets with unknown orderbooks
-      competition = 500;
+    } catch (err: any) {
+      // P31/MS-7: Without orderbook data we cannot verify tick size, negRisk, bid depth,
+      // or P30 maxSpread-vs-tick check. Skip the market entirely instead of using
+      // potentially wrong defaults that bypass safety filters.
+      this.logger.info(
+        `Skipping ${cand.condition_id.slice(0, 16)}: orderbook fetch failed (${err?.message || "unknown"})`,
+      );
+      return null;
     }
 
     // Score: reward per dollar deployed, adjusted for competition and capital efficiency

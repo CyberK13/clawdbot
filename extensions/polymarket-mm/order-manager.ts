@@ -59,6 +59,15 @@ export class OrderManager {
       }
     }
 
+    // CC-1: Collect surviving order IDs (matched to targets) so they remain
+    // in activeOrderIds and keep danger-zone protection.
+    const survivingIds: string[] = [];
+    for (const live of liveOrders) {
+      if (!toCancel.includes(live.orderId)) {
+        survivingIds.push(live.orderId);
+      }
+    }
+
     const placedIds: string[] = [];
     const toPlace = targets.filter((_, idx) => !matched.has(`${idx}`));
     for (const target of toPlace) {
@@ -66,7 +75,7 @@ export class OrderManager {
       if (tracked) placedIds.push(tracked.orderId);
     }
 
-    return placedIds;
+    return [...survivingIds, ...placedIds];
   }
 
   /** Place a single limit order. BUY uses GTD 5min for crash protection. */
@@ -216,8 +225,10 @@ export class OrderManager {
                     tracked.filledSize = tracked.originalSize;
                   }
                 }
-              } catch {
-                // Balance check failed
+              } catch (err: any) {
+                this.logger.warn(
+                  `OM-4: Balance check failed for ${tracked.tokenId.slice(0, 12)}…: ${err?.message}`,
+                );
               }
 
               if (!confirmedByBalance) {

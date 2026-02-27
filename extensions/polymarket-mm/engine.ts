@@ -251,7 +251,9 @@ export class MmEngine {
 
     try {
       await this.client.cancelAll();
-    } catch {}
+    } catch (err: any) {
+      this.logger.error(`P32: cancelAll in emergencyKill failed: ${err?.message}`);
+    }
 
     let liquidated = false;
     if (this.config.liquidateOnKill) {
@@ -391,6 +393,12 @@ export class MmEngine {
               ms.phase = "cooldown";
               ms.cooldownUntil = Date.now() + this.config.cooldownMs;
               this.stateMgr.setMarketState(mkt.conditionId, ms);
+            } else if (!ms.accidentalFill) {
+              // T1: exiting phase but no accidentalFill — should never happen, recover
+              this.logger.warn(`T1: Exiting phase but no accidentalFill, forcing cooldown`);
+              ms.phase = "cooldown";
+              ms.cooldownUntil = Date.now() + this.config.cooldownMs;
+              this.stateMgr.setMarketState(mkt.conditionId, ms);
             }
             break;
         }
@@ -409,7 +417,9 @@ export class MmEngine {
         try {
           this.cachedBalance = await this.client.getBalance();
           this.adjustSizingToBalance(this.cachedBalance);
-        } catch {}
+        } catch (err: any) {
+          this.logger.warn(`P32: Balance refresh failed: ${err?.message}`);
+        }
       }
       // Every 360 ticks (30min): market rescan
       if (this.tickCount % 360 === 0 || this.scanner.shouldRescan()) {
@@ -458,7 +468,11 @@ export class MmEngine {
       if (!order || order.status !== "live") continue;
 
       const mid = this.priceMap.get(order.tokenId);
-      if (!mid) continue;
+      if (!mid) {
+        // P35: No price data for this token — treat as dangerous (conservative).
+        // Better to cancel than to leave an unprotected order on the book.
+        return true;
+      }
 
       // 1. Classic mid-distance check
       const distance = Math.abs(mid - order.price);
@@ -546,7 +560,27 @@ export class MmEngine {
 
   private async placeQuotes(mkt: MmMarket, ms: MarketState): Promise<void> {
     const quotes = this.quoteEngine.generateQuotes(mkt, this.books);
-    if (quotes.length === 0) return;
+    if (quotes.length === 0) {
+      // P31: Track consecutive empty-quote ticks to detect unquotable markets
+      ms.emptyQuoteTicks = (ms.emptyQuoteTicks || 0) + 1;
+      if (ms.emptyQuoteTicks >= 6) {
+        // 6 ticks × 5s = 30s of empty quotes → market is unquotable, pause and rescan
+        this.logger.warn(
+          `🔄 P31: ${mkt.question.slice(0, 30)}… 连续${ms.emptyQuoteTicks}次空报价, 暂停并切换市场`,
+        );
+        const paused = [...new Set([...this.stateMgr.get().pausedMarkets, mkt.conditionId])];
+        this.stateMgr.update({ pausedMarkets: paused });
+        this.stateMgr.removeMarketState(mkt.conditionId);
+        await this.rescanMarketsInternal();
+      }
+      this.stateMgr.setMarketState(mkt.conditionId, ms);
+      return;
+    }
+
+    // Reset empty quote counter on success
+    if (ms.emptyQuoteTicks) {
+      ms.emptyQuoteTicks = 0;
+    }
 
     this.currentQuotes.set(mkt.conditionId, quotes);
     const placedIds = await this.orderMgr.refreshMarketOrders(mkt, quotes);
@@ -560,7 +594,9 @@ export class MmEngine {
         );
         try {
           await this.client.cancelOrders(placedIds);
-        } catch {}
+        } catch (err: any) {
+          this.logger.warn(`P32: Race cancel failed: ${err?.message}`);
+        }
         for (const id of placedIds) this.stateMgr.removeOrder(id);
       }
       return;
@@ -590,10 +626,20 @@ export class MmEngine {
     }
 
     const market = this.activeMarkets.find((m) => m.conditionId === order.conditionId);
-    if (!market) return;
+    if (!market) {
+      this.logger.warn(
+        `P42: handleFill — market ${order.conditionId.slice(0, 16)}… not in activeMarkets, ignoring fill`,
+      );
+      return;
+    }
 
     const ms = this.stateMgr.getMarketState(order.conditionId);
-    if (!ms) return;
+    if (!ms) {
+      this.logger.warn(
+        `P42: handleFill — no market state for ${order.conditionId.slice(0, 16)}…, ignoring fill`,
+      );
+      return;
+    }
 
     // If already selling from a previous fill on this market, just accumulate
     if (ms.phase === "exiting" && ms.accidentalFill) {
@@ -830,6 +876,9 @@ export class MmEngine {
     const drawdownPct = ((peak - currentValue) / peak) * 100;
 
     if (drawdownPct > this.config.maxDrawdownPercent) {
+      // P39: Set running=false synchronously before async emergencyKill
+      // to prevent tick loop from continuing during shutdown
+      this.running = false;
       this.emergencyKill(
         `Drawdown ${drawdownPct.toFixed(1)}% > ${this.config.maxDrawdownPercent}%`,
       );
