@@ -404,66 +404,65 @@ export class WsFeed {
 
     // P28 FIX: WS sends delta updates (often only bids OR asks, not both).
     // We merge with last known best bid/ask to compute mid correctly.
-    // Previous code required both sides in the same message, so onMidUpdate
-    // almost never fired — danger zone detection was silently broken.
+    //
+    // P52 FIX: Old code used Math.max(delta, prev) for bestBid — this meant
+    // bestBid could NEVER decrease from book deltas, only from explicit size=0
+    // removals. This created a stale-high bias: if the real BBO dropped due to
+    // fills/cancels, our tracked mid stayed artificially high → danger zone
+    // detection was delayed by minutes.
+    //
+    // New approach: bestBid only changes when the delta affects the best level
+    // (removal at best, or new bid above best). price_change events remain the
+    // authoritative source and correct any drift.
 
-    // Update best bid from delta (if bids present)
     if (bids.length > 0) {
-      let deltaBestBid = 0;
+      const currentBest = this.lastBestBid.get(assetId) ?? 0;
+      let deltaHighBid = 0;
+      let removalAtBest = false;
+
       for (const b of bids) {
         const p = parseFloat(b.price);
         const s = parseFloat(b.size);
-        // size=0 means order removed — might affect bestBid if it was the best
-        if (s > 0 && p > deltaBestBid) deltaBestBid = p;
+        if (s > 0 && p > deltaHighBid) deltaHighBid = p;
+        // size=0 at or above tracked best → best bid was consumed/cancelled
+        if (s === 0 && p >= currentBest && currentBest > 0) removalAtBest = true;
       }
-      if (deltaBestBid > 0) {
-        const prev = this.lastBestBid.get(assetId) ?? 0;
-        this.lastBestBid.set(assetId, Math.max(deltaBestBid, prev));
-      }
-      // Check if a removal might lower the best bid
-      for (const b of bids) {
-        const p = parseFloat(b.price);
-        const s = parseFloat(b.size);
-        if (s === 0 && p >= (this.lastBestBid.get(assetId) ?? 0)) {
-          // Best bid was removed — we can't know the new best bid from delta alone.
-          // Reset to let price_change or REST correct it. Use next-best from this delta.
-          let nextBest = 0;
-          for (const b2 of bids) {
-            const p2 = parseFloat(b2.price);
-            const s2 = parseFloat(b2.size);
-            if (s2 > 0 && p2 > nextBest) nextBest = p2;
-          }
-          if (nextBest > 0) this.lastBestBid.set(assetId, nextBest);
-          else this.lastBestBid.delete(assetId);
+
+      if (removalAtBest) {
+        // Best bid removed — use delta's highest remaining bid as new best
+        if (deltaHighBid > 0) {
+          this.lastBestBid.set(assetId, deltaHighBid);
+        } else {
+          // No bids left in this delta — clear to force conservative behavior
+          this.lastBestBid.delete(assetId);
         }
+      } else if (deltaHighBid > currentBest) {
+        // New bid above current best — update upward only
+        this.lastBestBid.set(assetId, deltaHighBid);
       }
+      // Bids below current best: no BBO change, ignore
     }
 
-    // Update best ask from delta (if asks present)
     if (asks.length > 0) {
-      let deltaBestAsk = Infinity;
+      const currentBest = this.lastBestAsk.get(assetId) ?? Infinity;
+      let deltaLowAsk = Infinity;
+      let removalAtBest = false;
+
       for (const a of asks) {
         const p = parseFloat(a.price);
         const s = parseFloat(a.size);
-        if (s > 0 && p > 0 && p < deltaBestAsk) deltaBestAsk = p;
+        if (s > 0 && p > 0 && p < deltaLowAsk) deltaLowAsk = p;
+        if (s === 0 && p <= currentBest && currentBest < Infinity) removalAtBest = true;
       }
-      if (deltaBestAsk < Infinity) {
-        const prev = this.lastBestAsk.get(assetId) ?? Infinity;
-        this.lastBestAsk.set(assetId, Math.min(deltaBestAsk, prev));
-      }
-      for (const a of asks) {
-        const p = parseFloat(a.price);
-        const s = parseFloat(a.size);
-        if (s === 0 && p <= (this.lastBestAsk.get(assetId) ?? Infinity)) {
-          let nextBest = Infinity;
-          for (const a2 of asks) {
-            const p2 = parseFloat(a2.price);
-            const s2 = parseFloat(a2.size);
-            if (s2 > 0 && p2 > 0 && p2 < nextBest) nextBest = p2;
-          }
-          if (nextBest < Infinity) this.lastBestAsk.set(assetId, nextBest);
-          else this.lastBestAsk.delete(assetId);
+
+      if (removalAtBest) {
+        if (deltaLowAsk < Infinity) {
+          this.lastBestAsk.set(assetId, deltaLowAsk);
+        } else {
+          this.lastBestAsk.delete(assetId);
         }
+      } else if (deltaLowAsk < currentBest) {
+        this.lastBestAsk.set(assetId, deltaLowAsk);
       }
     }
 

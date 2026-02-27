@@ -1234,19 +1234,43 @@ export class MmEngine {
           continue;
         }
 
-        const sellPrice = Math.max(0.01, bestBid);
         const tickSize = (book.tick_size || "0.01") as import("@polymarket/clob-client").TickSize;
         const negRisk = book.neg_risk || false;
 
-        // FAK sell with 3 retries (settlement delay)
-        let sold = false;
-        for (let attempt = 0; attempt < 3; attempt++) {
+        // P51: FAK sell loop — keep selling until balance is zero.
+        // Same pattern as immediateSell: FAK fills available liquidity,
+        // verify remaining balance, repeat at next bid level.
+        let remaining = shares;
+        let totalSold = 0;
+        let lastSellPrice = bestBid;
+        const maxRounds = 8;
+
+        for (let round = 0; round < maxRounds && remaining > 0.1; round++) {
           try {
+            // Re-fetch orderbook each round (bids consumed by previous FAK)
+            if (round > 0) {
+              try {
+                book = await this.client.getOrderBook(tokenId);
+              } catch {
+                break;
+              }
+              const newBids = book.bids || [];
+              const newBest =
+                newBids.length > 0 ? parseFloat(newBids[newBids.length - 1].price) : 0;
+              if (newBest <= 0) {
+                result.errors.push(
+                  `No more bids after round ${round} for ${tokenId.slice(0, 12)}…`,
+                );
+                break;
+              }
+              lastSellPrice = newBest;
+            }
+
             const sellResult = await this.client.createAndPostOrder(
               {
                 tokenID: tokenId,
-                price: sellPrice,
-                size: shares,
+                price: Math.max(0.01, lastSellPrice),
+                size: remaining,
                 side: Side.SELL,
                 feeRateBps: 0,
               },
@@ -1257,11 +1281,23 @@ export class MmEngine {
             if (sellResult?.success === false) {
               throw new Error(sellResult.errorMsg || "order rejected");
             }
-            sold = true;
-            break;
+
+            // Verify remaining balance
+            await new Promise((r) => setTimeout(r, 2_000));
+            const afterBalance = await this.client.getConditionalBalance(tokenId);
+            const sold = remaining - (afterBalance > 0 ? afterBalance : 0);
+            if (sold > 0) totalSold += sold;
+            remaining = afterBalance > 0 ? afterBalance : 0;
+
+            if (remaining > 0.1) {
+              this.logger.warn(
+                `sellAll: partial fill ${sold.toFixed(1)}/${(sold + remaining).toFixed(1)}, ` +
+                  `${remaining.toFixed(1)} remaining on ${tokenId.slice(0, 12)}…`,
+              );
+            }
           } catch (sellErr: any) {
             if (
-              attempt < 2 &&
+              round < maxRounds - 1 &&
               (sellErr.message?.includes("balance") || sellErr.message?.includes("allowance"))
             ) {
               await new Promise((r) => setTimeout(r, 5_000));
@@ -1272,18 +1308,19 @@ export class MmEngine {
           }
         }
 
-        result.sold.push({ tokenId, shares, price: sellPrice, ok: sold });
+        const ok = remaining <= 0.1;
+        result.sold.push({ tokenId, shares: totalSold || shares, price: lastSellPrice, ok });
 
-        // Update state if sold
-        if (sold) {
+        // Update state
+        if (totalSold > 0) {
           const pos = this.stateMgr.getPosition(tokenId);
           if (pos) {
             this.stateMgr.updatePosition(
               tokenId,
               conditionId,
               pos.outcome,
-              shares,
-              sellPrice,
+              totalSold,
+              lastSellPrice,
               "SELL",
             );
           }
