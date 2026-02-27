@@ -171,6 +171,7 @@
     "express": "^5.2.1",
     "file-type": "^21.3.0",
     "finnhub-ts": "^1.0.7",
+    "googleapis": "^171.4.0",
     "grammy": "^1.40.0",
     "https-proxy-agent": "^7.0.6",
     "ipaddr.js": "^2.3.0",

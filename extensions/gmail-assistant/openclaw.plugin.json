@@ -1,0 +1,10 @@
+{
+  "id": "gmail-assistant",
+  "name": "Gmail AI Assistant",
+  "description": "OAuth-based Gmail digest with AI summarization, multi-user support, and scheduled delivery.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {}
+  }
+}

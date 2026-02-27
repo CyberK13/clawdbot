@@ -1,0 +1,14 @@
+{
+  "name": "@openclaw/gmail-assistant",
+  "version": "2026.2.27",
+  "description": "Gmail AI digest with OAuth binding, encrypted token storage, multi-user support",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

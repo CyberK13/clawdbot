@@ -4,11 +4,9 @@
 // Registers:
 //   - Service: background MM engine with start/stop lifecycle
 //   - Command: /mm for Telegram control
-//   - Command: /mail for on-demand Gmail digest
 //   - Tool: polymarket_mm for AI agent queries
 // ---------------------------------------------------------------------------
 
-import { spawn } from "node:child_process";
 import type {
   OpenClawPluginApi,
   OpenClawPluginToolFactory,
@@ -105,26 +103,6 @@ export default function register(api: OpenClawPluginApi) {
 
       const handler = createMmCommandHandler(engine);
       return handler(ctx);
-    },
-  });
-
-  // ---------- Command: /mail -----------------------------------------------
-  api.registerCommand({
-    name: "mail",
-    description: "读取所有未读邮件并生成 AI 摘要",
-    acceptsArgs: false,
-    requireAuth: true,
-    handler: async (ctx) => {
-      const scriptPath = "/opt/clawdbot/gmail-digest-all.py";
-      const chatId = ctx.senderId || "6309937609";
-      const proc = spawn("python3", [scriptPath], {
-        stdio: "ignore",
-        detached: true,
-        env: { ...process.env, CHAT_ID: chatId },
-      });
-      proc.unref();
-      api.logger.info(`/mail triggered by ${ctx.senderId}`);
-      return { text: "📬 正在读取邮件..." };
     },
   });
 
