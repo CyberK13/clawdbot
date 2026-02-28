@@ -12,21 +12,21 @@ export const DEFAULT_CONFIG: MmConfig = {
   reserveRatio: 0.02,
 
   // Quoting — simple: targetSpread = maxSpread × spreadRatio
-  // P53: increased from 0.65 to 0.85 — orders at 85% of maxSpread from mid.
-  // Scoring at 0.85: (0.15)² = 2.25% of max (was 12.25% at 0.65).
-  // Tradeoff: much less rewards but dramatically fewer fills on volatile markets.
-  // For 5¢ maxSpread: order 4.25¢ from mid (was 2.9¢). Buffer to trigger = 1.5¢.
-  spreadRatio: 0.85,
+  // P54: increased from 0.85 to 0.90 — orders at 90% of maxSpread from mid.
+  // Scoring at 0.90: (0.10)² = 1% of max. Very low rewards but maximum safety.
+  // Combined with singleSided=true → half exposure, further from mid.
+  // For 8¢ maxSpread: order 7.2¢ from mid. Buffer = 2.0¢ (was 1.1¢ at P53).
+  spreadRatio: 0.9,
   orderSize: 0, // computed at runtime
   refreshIntervalMs: 10_000,
 
   // Danger zone — core v5: cancel before fill
-  // P53: increased from 0.35 to 0.55 — trigger much earlier.
-  // At spreadRatio=0.85, dangerRatio=0.55:
-  //   buffer(trigger→order) = (0.85-0.55) × maxSpread = 0.30 × maxSpread
-  //   buffer(mid→trigger)   = 0.55 × maxSpread
-  // For maxSpread=5¢: order=4.25¢ from mid, trigger=2.75¢, buffer=1.5¢
-  dangerSpreadRatio: 0.55,
+  // P54: increased from 0.55 to 0.65 — trigger even earlier.
+  // At spreadRatio=0.90, dangerRatio=0.65:
+  //   buffer(trigger→order) = (0.90-0.65) × maxSpread = 0.25 × maxSpread
+  //   buffer(mid→trigger)   = 0.65 × maxSpread
+  // For 8¢ maxSpread: order=7.2¢, trigger=5.2¢, buffer=2.0¢ (was 1.1¢)
+  dangerSpreadRatio: 0.65,
   cooldownMs: 120_000, // 2 minutes cooldown after danger zone cancel
   // P29: disabled cushion check (was 1.5). Unreliable on thin books — REST API
   // doesn't give full depth, causing false triggers. Rely on mid-distance check
@@ -37,9 +37,10 @@ export const DEFAULT_CONFIG: MmConfig = {
   maxConcurrentMarkets: 1,
   minDailyVolume: 100,
   minRewardRate: 30,
-  // P53: require maxSpread ≥ 5¢ — tight-spread markets get filled too easily
-  // even with high spreadRatio. 5¢ gives 1.5¢ buffer at spreadRatio=0.85/dangerRatio=0.55.
-  minMaxSpread: 0.05,
+  // P54: require maxSpread ≥ 8¢ — 5¢ only gave 1.1¢ buffer (still got filled).
+  // 8¢ gives 2.0¢ buffer at spreadRatio=0.90/dangerRatio=0.65.
+  // Fewer markets qualify, but those that do have meaningful safety margin.
+  minMaxSpread: 0.08,
   // P51: increased from 200 to 500 — thicker books are harder to sweep through
   minBidDepthUsd: 500,
 
@@ -52,7 +53,10 @@ export const DEFAULT_CONFIG: MmConfig = {
   maxDailyLoss: 30,
 
   // Exit behavior
-  singleSided: false,
+  // P54: single-sided — only BUY the cheaper token.
+  // Half the exposure, half the fill risk. 1/3 rewards (no Q_min two-sided bonus).
+  // At extreme prices (<0.10 or >0.90), auto-reverts to two-sided.
+  singleSided: true,
   liquidateOnStop: false,
   liquidateOnKill: true,
 };
@@ -64,7 +68,7 @@ export function resolveConfig(overrides?: Partial<MmConfig>): MmConfig {
   cfg.deployRatio = clamp(cfg.deployRatio, 0.5, 1.0);
   cfg.orderSizeRatio = clamp(cfg.orderSizeRatio, 0.1, 0.5);
   cfg.reserveRatio = clamp(cfg.reserveRatio, 0, 0.5);
-  cfg.spreadRatio = clamp(cfg.spreadRatio, 0.1, 0.9);
+  cfg.spreadRatio = clamp(cfg.spreadRatio, 0.1, 0.95);
   cfg.orderSize = Math.max(0, cfg.orderSize);
   cfg.refreshIntervalMs = Math.max(5_000, cfg.refreshIntervalMs);
   cfg.dangerSpreadRatio = clamp(cfg.dangerSpreadRatio, 0.05, 0.8);

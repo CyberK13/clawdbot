@@ -156,6 +156,17 @@ export class MarketScanner {
       return null;
     }
 
+    // P54: Skip unbalanced markets — cheap tokens have terrible exit slippage.
+    // At 0.15/0.85 a fill on the cheap side means selling into a thin bid book.
+    // Prefer balanced markets (0.25-0.75) where fill cost is minimal.
+    const minTokenPrice = Math.min(p0, p1);
+    if (minTokenPrice < 0.15) {
+      this.logger.info(
+        `Skipping ${cand.condition_id.slice(0, 16)}: unbalanced prices (${p0.toFixed(2)}/${p1.toFixed(2)}, min=${minTokenPrice.toFixed(2)} < 0.15)`,
+      );
+      return null;
+    }
+
     // Volume filter: skip low-volume markets (unreliable books, harder exits)
     // Note: CLOB API may not return volume — only filter when data is available
     const rawVolume = detail.volume_num_24hr ?? detail.volume;
