@@ -37,10 +37,10 @@ export const DEFAULT_CONFIG: MmConfig = {
   maxConcurrentMarkets: 1,
   minDailyVolume: 100,
   minRewardRate: 30,
-  // P54: require maxSpread ≥ 6¢ — 5¢ only gave 1.1¢ buffer (still got filled).
-  // 8¢ was too strict (0 markets). 6¢ gives 1.5¢ buffer + singleSided halves risk.
-  // Net safety: ~equivalent to 3¢ buffer two-sided (better than P53's 1.1¢ two-sided).
-  minMaxSpread: 0.06,
+  // P54: back to 5¢ — 6¢/8¢ filtered ALL markets (reward markets cluster at 3.5-5.5¢).
+  // Safety comes from singleSided + spreadRatio=0.90 + dangerRatio=0.65 instead.
+  // Buffer = 1.25¢ at 5¢ maxSpread, but only 1 order exposed (half risk vs P53).
+  minMaxSpread: 0.05,
   // P51: increased from 200 to 500 — thicker books are harder to sweep through
   minBidDepthUsd: 500,
 

@@ -17,8 +17,10 @@ import type { PolymarketClient } from "./client.js";
 import type { MmConfig, MmMarket, MmToken } from "./types.js";
 import { scoringFunction } from "./utils.js";
 
-/** How many candidates to fetch full details for (avoid 3000+ API calls). */
-const CANDIDATE_POOL_SIZE = 30;
+/** How many candidates to fetch full details for (avoid 3000+ API calls).
+ * P54: increased from 30 to 50 — wider-spread markets may rank lower by rate
+ * but are safer and still profitable. Need to look deeper. */
+const CANDIDATE_POOL_SIZE = 50;
 
 export class MarketScanner {
   private logger: PluginLogger;
