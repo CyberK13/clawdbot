@@ -32,6 +32,7 @@ export interface MmConfig {
   // Market selection
   maxConcurrentMarkets: number;
   minRewardRate: number;
+  minMaxSpread: number; // minimum rewards_max_spread in price units (e.g. 0.05 = 5¢)
   minBidDepthUsd: number;
   minDailyVolume: number;
 

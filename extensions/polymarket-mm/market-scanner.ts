@@ -196,6 +196,14 @@ export class MarketScanner {
     const maxSpreadCents = cand.rewards_max_spread;
     const maxSpreadPrice = maxSpreadCents / 100; // 3.5 cents → 0.035
 
+    // P53: Skip markets with maxSpread too tight — not enough room for safe quoting
+    if (this.config.minMaxSpread > 0 && maxSpreadPrice < this.config.minMaxSpread) {
+      this.logger.info(
+        `Skipping ${cand.condition_id.slice(0, 16)}: maxSpread ${(maxSpreadPrice * 100).toFixed(1)}¢ < min ${(this.config.minMaxSpread * 100).toFixed(1)}¢`,
+      );
+      return null;
+    }
+
     // Fetch orderbook to assess competition
     let competition = 0;
     let tickSize: TickSize = "0.01";
